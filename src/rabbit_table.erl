@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_table).
@@ -24,21 +24,17 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(create/0 :: () -> 'ok').
--spec(create_local_copy/1 :: ('disc' | 'ram') -> 'ok').
--spec(wait_for_replicated/0 :: () -> 'ok').
--spec(wait/1 :: ([atom()]) -> 'ok').
--spec(wait_timeout/0 :: () -> non_neg_integer() | infinity).
--spec(force_load/0 :: () -> 'ok').
--spec(is_present/0 :: () -> boolean()).
--spec(is_empty/0 :: () -> boolean()).
--spec(needs_default_data/0 :: () -> boolean()).
--spec(check_schema_integrity/0 :: () -> rabbit_types:ok_or_error(any())).
--spec(clear_ram_only_tables/0 :: () -> 'ok').
-
--endif.
+-spec create() -> 'ok'.
+-spec create_local_copy('disc' | 'ram') -> 'ok'.
+-spec wait_for_replicated() -> 'ok'.
+-spec wait([atom()]) -> 'ok'.
+-spec wait_timeout() -> non_neg_integer() | infinity.
+-spec force_load() -> 'ok'.
+-spec is_present() -> boolean().
+-spec is_empty() -> boolean().
+-spec needs_default_data() -> boolean().
+-spec check_schema_integrity() -> rabbit_types:ok_or_error(any()).
+-spec clear_ram_only_tables() -> 'ok'.
 
 %%----------------------------------------------------------------------------
 %% Main interface
@@ -54,7 +50,19 @@ create() ->
                                                  Tab, TabDef1, Reason}})
                           end
                   end, definitions()),
+    ensure_secondary_indexes(),
     ok.
+
+%% Sets up secondary indexes in a blank node database.
+ensure_secondary_indexes() ->
+  ensure_secondary_index(rabbit_queue, vhost),
+  ok.
+
+ensure_secondary_index(Table, Field) ->
+  case mnesia:add_table_index(Table, Field) of
+    {atomic, ok}                          -> ok;
+    {aborted, {already_exists, Table, _}} -> ok
+  end.
 
 %% The sequence in which we delete the schema and then the other
 %% tables is important: if we delete the schema first when moving to

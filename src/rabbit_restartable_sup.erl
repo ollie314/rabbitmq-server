@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_restartable_sup).
@@ -28,12 +28,8 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/3 :: (atom(), rabbit_types:mfargs(), boolean()) ->
-                           rabbit_types:ok_pid_or_error()).
-
--endif.
+-spec start_link(atom(), rabbit_types:mfargs(), boolean()) ->
+                           rabbit_types:ok_pid_or_error().
 
 %%----------------------------------------------------------------------------
 
@@ -45,4 +41,4 @@ init([{Mod, _F, _A} = Fun, Delay]) ->
           [{Mod, Fun, case Delay of
                           true  -> {transient, 1};
                           false -> transient
-                      end, ?MAX_WAIT, worker, [Mod]}]}}.
+                      end, ?WORKER_WAIT, worker, [Mod]}]}}.

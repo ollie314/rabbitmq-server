@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_amqqueue_sup_sup).
@@ -28,13 +28,10 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
--spec(start_queue_process/3 :: (node(), rabbit_types:amqqueue(),
-                               'declare' | 'recovery' | 'slave') -> pid()).
-
--endif.
+-spec start_link() -> rabbit_types:ok_pid_or_error().
+-spec start_queue_process
+        (node(), rabbit_types:amqqueue(), 'declare' | 'recovery' | 'slave') ->
+            pid().
 
 %%----------------------------------------------------------------------------
 
@@ -49,4 +46,4 @@ start_queue_process(Node, Q, StartMode) ->
 init([]) ->
     {ok, {{simple_one_for_one, 10, 10},
           [{rabbit_amqqueue_sup, {rabbit_amqqueue_sup, start_link, []},
-            temporary, ?MAX_WAIT, supervisor, [rabbit_amqqueue_sup]}]}}.
+            temporary, ?SUPERVISOR_WAIT, supervisor, [rabbit_amqqueue_sup]}]}}.

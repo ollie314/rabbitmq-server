@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_trace).
@@ -26,23 +26,19 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
+-type state() :: rabbit_types:exchange() | 'none'.
 
--type(state() :: rabbit_types:exchange() | 'none').
-
--spec(init/1 :: (rabbit_types:vhost()) -> state()).
--spec(enabled/1 :: (rabbit_types:vhost()) -> boolean()).
--spec(tap_in/6 :: (rabbit_types:basic_message(), [rabbit_amqqueue:name()],
+-spec init(rabbit_types:vhost()) -> state().
+-spec enabled(rabbit_types:vhost()) -> boolean().
+-spec tap_in(rabbit_types:basic_message(), [rabbit_amqqueue:name()],
                    binary(), rabbit_channel:channel_number(),
-                   rabbit_types:username(), state()) -> 'ok').
--spec(tap_out/5 :: (rabbit_amqqueue:qmsg(), binary(),
+                   rabbit_types:username(), state()) -> 'ok'.
+-spec tap_out(rabbit_amqqueue:qmsg(), binary(),
                     rabbit_channel:channel_number(),
-                    rabbit_types:username(), state()) -> 'ok').
+                    rabbit_types:username(), state()) -> 'ok'.
 
--spec(start/1 :: (rabbit_types:vhost()) -> 'ok').
--spec(stop/1 :: (rabbit_types:vhost()) -> 'ok').
-
--endif.
+-spec start(rabbit_types:vhost()) -> 'ok'.
+-spec stop(rabbit_types:vhost()) -> 'ok'.
 
 %%----------------------------------------------------------------------------
 

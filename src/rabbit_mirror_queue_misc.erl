@@ -20,9 +20,11 @@
 -export([remove_from_queue/3, on_node_up/0, add_mirrors/3,
          report_deaths/4, store_updated_slaves/1,
          initial_queue_node/2, suggested_queue_nodes/1,
-         is_mirrored/1, update_mirrors/2, validate_policy/1,
+         is_mirrored/1, update_mirrors/2, update_mirrors/1, validate_policy/1,
          maybe_auto_sync/1, maybe_drop_master_after_sync/1,
          sync_batch_size/1, log_info/3, log_warning/3]).
+
+-export([sync_queue/1, cancel_sync_queue/1]).
 
 %% for testing only
 -export([module/1]).
@@ -48,28 +50,26 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(remove_from_queue/3 ::
-        (rabbit_amqqueue:name(), pid(), [pid()])
-        -> {'ok', pid(), [pid()], [node()]} | {'error', 'not_found'}).
--spec(on_node_up/0 :: () -> 'ok').
--spec(add_mirrors/3 :: (rabbit_amqqueue:name(), [node()], 'sync' | 'async')
-                       -> 'ok').
--spec(store_updated_slaves/1 :: (rabbit_types:amqqueue()) ->
-                                     rabbit_types:amqqueue()).
--spec(initial_queue_node/2 :: (rabbit_types:amqqueue(), node()) -> node()).
--spec(suggested_queue_nodes/1 :: (rabbit_types:amqqueue()) ->
-                                      {node(), [node()]}).
--spec(is_mirrored/1 :: (rabbit_types:amqqueue()) -> boolean()).
--spec(update_mirrors/2 ::
-        (rabbit_types:amqqueue(), rabbit_types:amqqueue()) -> 'ok').
--spec(maybe_drop_master_after_sync/1 :: (rabbit_types:amqqueue()) -> 'ok').
--spec(maybe_auto_sync/1 :: (rabbit_types:amqqueue()) -> 'ok').
--spec(log_info/3 :: (rabbit_amqqueue:name(), string(), [any()]) -> 'ok').
--spec(log_warning/3 :: (rabbit_amqqueue:name(), string(), [any()]) -> 'ok').
-
--endif.
+-spec remove_from_queue
+        (rabbit_amqqueue:name(), pid(), [pid()]) ->
+            {'ok', pid(), [pid()], [node()]} | {'error', 'not_found'}.
+-spec on_node_up() -> 'ok'.
+-spec add_mirrors(rabbit_amqqueue:name(), [node()], 'sync' | 'async') ->
+          'ok'.
+-spec store_updated_slaves(rabbit_types:amqqueue()) ->
+          rabbit_types:amqqueue().
+-spec initial_queue_node(rabbit_types:amqqueue(), node()) -> node().
+-spec suggested_queue_nodes(rabbit_types:amqqueue()) ->
+          {node(), [node()]}.
+-spec is_mirrored(rabbit_types:amqqueue()) -> boolean().
+-spec update_mirrors
+        (rabbit_types:amqqueue(), rabbit_types:amqqueue()) -> 'ok'.
+-spec update_mirrors
+        (rabbit_types:amqqueue()) -> 'ok'.
+-spec maybe_drop_master_after_sync(rabbit_types:amqqueue()) -> 'ok'.
+-spec maybe_auto_sync(rabbit_types:amqqueue()) -> 'ok'.
+-spec log_info(rabbit_amqqueue:name(), string(), [any()]) -> 'ok'.
+-spec log_warning(rabbit_amqqueue:name(), string(), [any()]) -> 'ok'.
 
 %%----------------------------------------------------------------------------
 
@@ -78,7 +78,7 @@ remove_from_queue(QueueName, Self, DeadGMPids) ->
     rabbit_misc:execute_mnesia_transaction(
       fun () ->
               %% Someone else could have deleted the queue before we
-              %% get here.
+              %% get here. Or, gm group could've altered. see rabbitmq-server#914
               case mnesia:read({rabbit_queue, QueueName}) of
                   [] -> {error, not_found};
                   [Q = #amqqueue { pid        = QPid,
@@ -92,7 +92,16 @@ remove_from_queue(QueueName, Self, DeadGMPids) ->
                       AlivePids = [Pid || {_GM, Pid} <- AliveGM],
                       Alive     = [Pid || Pid <- [QPid | SPids],
                                           lists:member(Pid, AlivePids)],
-                      {QPid1, SPids1} = promote_slave(Alive),
+                      {QPid1, SPids1} = case Alive of
+                                            [] ->
+                                                %% GM altered, & if all pids are
+                                                %% perceived as dead, rather do
+                                                %% do nothing here, & trust the
+                                                %% promoted slave to have updated
+                                                %% mnesia during the alteration.
+                                                {QPid, SPids};
+                                            _  -> promote_slave(Alive)
+                                        end,
                       Extra =
                           case {{QPid, SPids}, {QPid1, SPids1}} of
                               {Same, Same} ->
@@ -100,7 +109,8 @@ remove_from_queue(QueueName, Self, DeadGMPids) ->
                               _ when QPid =:= QPid1 orelse QPid1 =:= Self ->
                                   %% Either master hasn't changed, so
                                   %% we're ok to update mnesia; or we have
-                                  %% become the master.
+                                  %% become the master. If gm altered,
+                                  %% we have no choice but to proceed.
                                   Q1 = Q#amqqueue{pid        = QPid1,
                                                   slave_pids = SPids1,
                                                   gm_pids    = AliveGM},
@@ -364,6 +374,16 @@ maybe_auto_sync(Q = #amqqueue{pid = QPid}) ->
             ok
     end.
 
+sync_queue(Q) ->
+    rabbit_amqqueue:with(
+      Q, fun(#amqqueue{pid = QPid}) -> rabbit_amqqueue:sync_mirrors(QPid) end).
+
+cancel_sync_queue(Q) ->
+    rabbit_amqqueue:with(
+      Q, fun(#amqqueue{pid = QPid}) ->
+                 rabbit_amqqueue:cancel_sync_mirrors(QPid)
+         end).
+
 sync_batch_size(#amqqueue{} = Q) ->
     case policy(<<"ha-sync-batch-size">>, Q) of
         none -> %% we need this case because none > 1 == true
@@ -384,15 +404,12 @@ update_mirrors(OldQ = #amqqueue{pid = QPid},
                NewQ = #amqqueue{pid = QPid}) ->
     case {is_mirrored(OldQ), is_mirrored(NewQ)} of
         {false, false} -> ok;
-        {true,  false} -> rabbit_amqqueue:stop_mirroring(QPid);
-        {false,  true} -> rabbit_amqqueue:start_mirroring(QPid);
-        {true,   true} -> update_mirrors0(OldQ, NewQ)
+        _ -> rabbit_amqqueue:update_mirroring(QPid)
     end.
 
-update_mirrors0(OldQ = #amqqueue{name = QName},
-                NewQ = #amqqueue{name = QName}) ->
-    {OldMNode, OldSNodes, _} = actual_queue_nodes(OldQ),
-    {NewMNode, NewSNodes}    = suggested_queue_nodes(NewQ),
+update_mirrors(Q = #amqqueue{name = QName}) ->
+    {OldMNode, OldSNodes, _} = actual_queue_nodes(Q),
+    {NewMNode, NewSNodes}    = suggested_queue_nodes(Q),
     OldNodes = [OldMNode | OldSNodes],
     NewNodes = [NewMNode | NewSNodes],
     %% When a mirror dies, remove_from_queue/2 might have to add new
@@ -406,7 +423,7 @@ update_mirrors0(OldQ = #amqqueue{name = QName},
     drop_mirrors(QName, OldNodes -- NewNodes),
     %% This is for the case where no extra nodes were added but we changed to
     %% a policy requiring auto-sync.
-    maybe_auto_sync(NewQ),
+    maybe_auto_sync(Q),
     ok.
 
 %% The arrival of a newly synced slave may cause the master to die if

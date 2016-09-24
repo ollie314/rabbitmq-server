@@ -11,52 +11,80 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_runtime_parameters).
 
+%% Runtime parameters are bits of configuration that are
+%% set, as the name implies, at runtime and not in the config file.
+%%
+%% The benefits of storing some bits of configuration at runtime vary:
+%%
+%%  * Some parameters are vhost-specific
+%%  * Others are specific to individual nodes
+%%  * ...or even queues, exchanges, etc
+%%
+%% The most obvious use case for runtime parameters is policies but
+%% there are others:
+%% 
+%% * Plugin-specific parameters that only make sense at runtime,
+%%   e.g. Federation and Shovel link settings
+%% * Exchange and queue decorators
+%%
+%% Parameters are grouped by components, e.g. <<"policy">> or <<"shovel">>.
+%% Components are mapped to modules that perform validation.
+%% Runtime parameter values are then looked up by the modules that
+%% need to use them.
+%%
+%% Parameters are stored in Mnesia and can be global. Their changes
+%% are broadcasted over rabbit_event.
+%%
+%% See also:
+%%
+%%  * rabbit_policies
+%%  * rabbit_policy
+%%  * rabbit_registry
+%%  * rabbit_event
+
 -include("rabbit.hrl").
 
 -export([parse_set/5, set/5, set_any/5, clear/3, clear_any/3, list/0, list/1,
-         list_component/1, list/2, list_formatted/1, lookup/3,
-         value/3, value/4, info_keys/0]).
+         list_component/1, list/2, list_formatted/1, list_formatted/3,
+         lookup/3, value/3, value/4, info_keys/0, clear_component/1]).
 
 -export([set_global/2, value_global/1, value_global/2]).
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
+-type ok_or_error_string() :: 'ok' | {'error_string', string()}.
+-type ok_thunk_or_error_string() :: ok_or_error_string() | fun(() -> 'ok').
 
--type(ok_or_error_string() :: 'ok' | {'error_string', string()}).
--type(ok_thunk_or_error_string() :: ok_or_error_string() | fun(() -> 'ok')).
-
--spec(parse_set/5 :: (rabbit_types:vhost(), binary(), binary(), string(),
-                      rabbit_types:user() | 'none') -> ok_or_error_string()).
--spec(set/5 :: (rabbit_types:vhost(), binary(), binary(), term(),
-                rabbit_types:user() | 'none') -> ok_or_error_string()).
--spec(set_any/5 :: (rabbit_types:vhost(), binary(), binary(), term(),
-                    rabbit_types:user() | 'none') -> ok_or_error_string()).
--spec(set_global/2 :: (atom(), term()) -> 'ok').
--spec(clear/3 :: (rabbit_types:vhost(), binary(), binary())
-                 -> ok_thunk_or_error_string()).
--spec(clear_any/3 :: (rabbit_types:vhost(), binary(), binary())
-                     -> ok_thunk_or_error_string()).
--spec(list/0 :: () -> [rabbit_types:infos()]).
--spec(list/1 :: (rabbit_types:vhost() | '_') -> [rabbit_types:infos()]).
--spec(list_component/1 :: (binary()) -> [rabbit_types:infos()]).
--spec(list/2 :: (rabbit_types:vhost() | '_', binary() | '_')
-                -> [rabbit_types:infos()]).
--spec(list_formatted/1 :: (rabbit_types:vhost()) -> [rabbit_types:infos()]).
--spec(lookup/3 :: (rabbit_types:vhost(), binary(), binary())
-                  -> rabbit_types:infos() | 'not_found').
--spec(value/3 :: (rabbit_types:vhost(), binary(), binary()) -> term()).
--spec(value/4 :: (rabbit_types:vhost(), binary(), binary(), term()) -> term()).
--spec(value_global/1 :: (atom()) -> term() | 'not_found').
--spec(value_global/2 :: (atom(), term()) -> term()).
--spec(info_keys/0 :: () -> rabbit_types:info_keys()).
-
--endif.
+-spec parse_set(rabbit_types:vhost(), binary(), binary(), string(),
+                      rabbit_types:user() | 'none') -> ok_or_error_string().
+-spec set(rabbit_types:vhost(), binary(), binary(), term(),
+                rabbit_types:user() | 'none') -> ok_or_error_string().
+-spec set_any(rabbit_types:vhost(), binary(), binary(), term(),
+                    rabbit_types:user() | 'none') -> ok_or_error_string().
+-spec set_global(atom(), term()) -> 'ok'.
+-spec clear(rabbit_types:vhost(), binary(), binary())
+                 -> ok_thunk_or_error_string().
+-spec clear_any(rabbit_types:vhost(), binary(), binary())
+                     -> ok_thunk_or_error_string().
+-spec list() -> [rabbit_types:infos()].
+-spec list(rabbit_types:vhost() | '_') -> [rabbit_types:infos()].
+-spec list_component(binary()) -> [rabbit_types:infos()].
+-spec list(rabbit_types:vhost() | '_', binary() | '_')
+                -> [rabbit_types:infos()].
+-spec list_formatted(rabbit_types:vhost()) -> [rabbit_types:infos()].
+-spec list_formatted(rabbit_types:vhost(), reference(), pid()) -> 'ok'.
+-spec lookup(rabbit_types:vhost(), binary(), binary())
+                  -> rabbit_types:infos() | 'not_found'.
+-spec value(rabbit_types:vhost(), binary(), binary()) -> term().
+-spec value(rabbit_types:vhost(), binary(), binary(), term()) -> term().
+-spec value_global(atom()) -> term() | 'not_found'.
+-spec value_global(atom(), term()) -> term().
+-spec info_keys() -> rabbit_types:info_keys().
 
 %%---------------------------------------------------------------------------
 
@@ -139,6 +167,17 @@ clear(_, <<"policy">> , _) ->
 clear(VHost, Component, Name) ->
     clear_any(VHost, Component, Name).
 
+clear_component(Component) ->
+    case rabbit_runtime_parameters:list_component(Component) of
+        [] ->
+            ok;
+        Xs ->
+            [rabbit_runtime_parameters:clear(pget(vhost, X),
+                                             pget(component, X),
+                                             pget(name, X))|| X <- Xs],
+            ok
+    end.
+
 clear_any(VHost, Component, Name) ->
     Notify = fun () ->
                      case lookup_component(Component) of
@@ -197,6 +236,11 @@ list(VHost, Component) ->
 
 list_formatted(VHost) ->
     [pset(value, format(pget(value, P)), P) || P <- list(VHost)].
+
+list_formatted(VHost, Ref, AggregatorPid) ->
+    rabbit_control_misc:emitting_map(
+      AggregatorPid, Ref,
+      fun(P) -> pset(value, format(pget(value, P)), P) end, list(VHost)).
 
 lookup(VHost, Component, Name) ->
     case lookup0({VHost, Component, Name}, rabbit_misc:const(not_found)) of

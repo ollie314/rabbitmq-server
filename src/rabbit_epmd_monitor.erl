@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_epmd_monitor).
@@ -30,11 +30,7 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
-
--endif.
+-spec start_link() -> rabbit_types:ok_pid_or_error().
 
 %%----------------------------------------------------------------------------
 %% It's possible for epmd to be killed out from underneath us. If that

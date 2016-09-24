@@ -29,12 +29,12 @@
 -define(RAM_OPT, "--ram").
 -define(OFFLINE_OPT, "--offline").
 -define(ONLINE_OPT, "--online").
-
+-define(LOCAL_OPT, "--local").
 
 -define(NODE_DEF(Node), {?NODE_OPT, {option, Node}}).
 -define(QUIET_DEF, {?QUIET_OPT, flag}).
 -define(VHOST_DEF, {?VHOST_OPT, {option, "/"}}).
--define(TIMEOUT_DEF, {?TIMEOUT_OPT, {option, "infinity"}}).
+-define(TIMEOUT_DEF, {?TIMEOUT_OPT, {option, use_default}}).
 
 -define(VERBOSE_DEF, {?VERBOSE_OPT, flag}).
 -define(MINIMAL_DEF, {?MINIMAL_OPT, flag}).
@@ -46,5 +46,15 @@
 -define(RAM_DEF, {?RAM_OPT, flag}).
 -define(OFFLINE_DEF, {?OFFLINE_OPT, flag}).
 -define(ONLINE_DEF, {?ONLINE_OPT, flag}).
+-define(LOCAL_DEF, {?LOCAL_OPT, flag}).
 
--define(RPC_TIMEOUT, infinity).
+%% Subset of standartized exit codes from sysexits.h, see
+%% https://github.com/rabbitmq/rabbitmq-server/issues/396 for discussion.
+-define(EX_OK         ,  0).
+-define(EX_USAGE      , 64).  % Bad command-line arguments.
+-define(EX_DATAERR    , 65).  % Wrong data in command-line arguments.
+-define(EX_NOUSER     , 67).  % The user specified does not exist.
+-define(EX_UNAVAILABLE, 69).  % Could not connect to the target node.
+-define(EX_SOFTWARE   , 70).  % Failed to execute command.
+-define(EX_TEMPFAIL   , 75).  % Temporary error (e.g. something has timed out).
+-define(EX_CONFIG     , 78).  % Misconfiguration detected

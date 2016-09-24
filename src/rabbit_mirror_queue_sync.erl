@@ -18,7 +18,7 @@
 
 -include("rabbit.hrl").
 
--export([master_prepare/4, master_go/8, slave/7]).
+-export([master_prepare/4, master_go/8, slave/7, conserve_resources/3]).
 
 -define(SYNC_PROGRESS_INTERVAL, 1000000).
 
@@ -52,32 +52,28 @@
 %%                 ||                 || -- sync_complete --> ||
 %%                 ||               (Dies)                    ||
 
--ifdef(use_specs).
+-type log_fun() :: fun ((string(), [any()]) -> 'ok').
+-type bq() :: atom().
+-type bqs() :: any().
+-type ack() :: any().
+-type slave_sync_state() :: {[{rabbit_types:msg_id(), ack()}], timer:tref(),
+                             bqs()}.
 
--type(log_fun() :: fun ((string(), [any()]) -> 'ok')).
--type(bq() :: atom()).
--type(bqs() :: any()).
--type(ack() :: any()).
--type(slave_sync_state() :: {[{rabbit_types:msg_id(), ack()}], timer:tref(),
-                             bqs()}).
-
--spec(master_prepare/4 :: (reference(), rabbit_amqqueue:name(),
-                               log_fun(), [pid()]) -> pid()).
--spec(master_go/8 :: (pid(), reference(), log_fun(),
+-spec master_prepare(reference(), rabbit_amqqueue:name(),
+                               log_fun(), [pid()]) -> pid().
+-spec master_go(pid(), reference(), log_fun(),
                       rabbit_mirror_queue_master:stats_fun(),
                       rabbit_mirror_queue_master:stats_fun(),
                       non_neg_integer(),
                       bq(), bqs()) ->
                           {'already_synced', bqs()} | {'ok', bqs()} |
                           {'shutdown', any(), bqs()} |
-                          {'sync_died', any(), bqs()}).
--spec(slave/7 :: (non_neg_integer(), reference(), timer:tref(), pid(),
+                          {'sync_died', any(), bqs()}.
+-spec slave(non_neg_integer(), reference(), timer:tref(), pid(),
                   bq(), bqs(), fun((bq(), bqs()) -> {timer:tref(), bqs()})) ->
                       'denied' |
                       {'ok' | 'failed', slave_sync_state()} |
-                      {'stop', any(), slave_sync_state()}).
-
--endif.
+                      {'stop', any(), slave_sync_state()}.
 
 %% ---------------------------------------------------------------------------
 %% Master
@@ -108,7 +104,7 @@ master_batch_go0(Args, BatchSize, BQ, BQS) ->
                     false -> {cont, Acc1}
                 end
         end,
-    FoldAcc = {[], 0, {0, BQ:depth(BQS)}, time_compat:monotonic_time()},
+    FoldAcc = {[], 0, {0, BQ:depth(BQS)}, erlang:monotonic_time()},
     bq_fold(FoldFun, FoldAcc, Args, BQ, BQS).
 
 master_batch_send({Syncer, Ref, Log, HandleInfo, EmitStats, Parent},
@@ -168,12 +164,12 @@ stop_syncer(Syncer, Msg) ->
     end.
 
 maybe_emit_stats(Last, I, EmitStats, Log) ->
-    Interval = time_compat:convert_time_unit(
-                 time_compat:monotonic_time() - Last, native, micro_seconds),
+    Interval = erlang:convert_time_unit(
+                 erlang:monotonic_time() - Last, native, micro_seconds),
     case Interval > ?SYNC_PROGRESS_INTERVAL of
         true  -> EmitStats({syncing, I}),
                  Log("~p messages", [I]),
-                 time_compat:monotonic_time();
+                 erlang:monotonic_time();
         false -> Last
     end.
 
@@ -198,7 +194,7 @@ syncer(Ref, Log, MPid, SPids) ->
         []     -> Log("all slaves already synced", []);
         SPids1 -> MPid ! {ready, self()},
                   Log("mirrors ~p to sync", [[node(SPid) || SPid <- SPids1]]),
-                  syncer_loop(Ref, MPid, SPids1)
+                  syncer_check_resources(Ref, MPid, SPids1)
     end.
 
 await_slaves(Ref, SPids) ->
@@ -217,12 +213,43 @@ await_slaves(Ref, SPids) ->
 %% 'sync_start' and so will not reply. We need to act as though they are
 %% down.
 
+syncer_check_resources(Ref, MPid, SPids) ->
+    rabbit_alarm:register(self(), {?MODULE, conserve_resources, []}),
+    %% Before we ask the master node to send the first batch of messages
+    %% over here, we check if one node is already short on memory. If
+    %% that's the case, we wait for the alarm to be cleared before
+    %% starting the syncer loop.
+    AlarmedNodes = lists:any(
+      fun
+          ({{resource_limit, memory, _}, _}) -> true;
+          ({_, _})                           -> false
+      end, rabbit_alarm:get_alarms()),
+    if
+        not AlarmedNodes ->
+            MPid ! {next, Ref},
+            syncer_loop(Ref, MPid, SPids);
+        true ->
+            case wait_for_resources(Ref, SPids) of
+                cancel -> ok;
+                SPids1 -> MPid ! {next, Ref},
+                          syncer_loop(Ref, MPid, SPids1)
+            end
+    end.
+
 syncer_loop(Ref, MPid, SPids) ->
-    MPid ! {next, Ref},
     receive
+        {conserve_resources, memory, true} ->
+            case wait_for_resources(Ref, SPids) of
+                cancel -> ok;
+                SPids1 -> syncer_loop(Ref, MPid, SPids1)
+            end;
+        {conserve_resources, _, _} ->
+            %% Ignore other alerts.
+            syncer_loop(Ref, MPid, SPids);
         {msgs, Ref, Msgs} ->
             SPids1 = wait_for_credit(SPids),
             broadcast(SPids1, {sync_msgs, Ref, Msgs}),
+            MPid ! {next, Ref},
             syncer_loop(Ref, MPid, SPids1);
         {cancel, Ref} ->
             %% We don't tell the slaves we will die - so when we do
@@ -239,6 +266,10 @@ broadcast(SPids, Msg) ->
          SPid ! Msg
      end || SPid <- SPids].
 
+conserve_resources(Pid, Source, {_, Conserve, _}) ->
+    Pid ! {conserve_resources, Source, Conserve},
+    ok.
+
 wait_for_credit(SPids) ->
     case credit_flow:blocked() of
         true  -> receive
@@ -250,6 +281,24 @@ wait_for_credit(SPids) ->
                          wait_for_credit(lists:delete(SPid, SPids))
                  end;
         false -> SPids
+    end.
+
+wait_for_resources(Ref, SPids) ->
+    receive
+        {conserve_resources, memory, false} ->
+            SPids;
+        {conserve_resources, _, _} ->
+            %% Ignore other alerts.
+            wait_for_resources(Ref, SPids);
+        {cancel, Ref} ->
+            %% We don't tell the slaves we will die - so when we do
+            %% they interpret that as a failure, which is what we
+            %% want.
+            cancel;
+        {'DOWN', _, process, SPid, _} ->
+            credit_flow:peer_down(SPid),
+            SPids1 = wait_for_credit(lists:delete(SPid, SPids)),
+            wait_for_resources(Ref, SPids1)
     end.
 
 %% Syncer
@@ -352,46 +401,10 @@ batch_publish(Batch, MA, BQ, BQS) ->
     BQS1 = BQ:batch_publish(Batch, none, noflow, BQS),
     {MA, BQS1}.
 
-%% TODO
-%%
-%% The case clause in this function assumes that we are either dealing
-%% with a backing_queue that returns acktags as integers, or a
-%% priority queue.
-%% A possible fix to this would be to add a function
-%% to the BQ API where we pass a list of messages and acktags and the
-%% BQ implementation knows how to zip them together.
 batch_publish_delivered(Batch, MA, BQ, BQS) ->
     {AckTags, BQS1} = BQ:batch_publish_delivered(Batch, none, noflow, BQS),
-    MA1 =
-        case hd(AckTags) of
-            HeadTag when is_integer(HeadTag) ->
-                lists:foldl(fun ({{Msg, _}, AckTag}, MAs) ->
-                                    [{msg_id(Msg), AckTag} | MAs]
-                            end, MA, lists:zip(Batch, AckTags));
-            _AckTags  ->
-                %% priority queue processing of acktags
-                BatchByPriority = batch_by_priority(Batch),
-                lists:foldl(fun (Acks, MAs) ->
-                                    {P, _AckTag} = hd(Acks),
-                                    Pubs = orddict:fetch(P, BatchByPriority),
-                                    MAs0 = zip_msgs_and_tags(Pubs, Acks),
-                                    MAs ++ MAs0
-                            end, MA, AckTags)
-        end,
+    MA1 = BQ:zip_msgs_and_acks(Batch, AckTags, MA, BQS1),
     {MA1, BQS1}.
-
-batch_by_priority(Batch) ->
-    rabbit_priority_queue:partition_publish_delivered_batch(Batch).
-
-zip_msgs_and_tags(Pubs, AckTags) ->
-    lists:zipwith(
-      fun (Pub, AckTag) ->
-              {Msg, _Props} = Pub,
-              {msg_id(Msg), AckTag}
-      end, Pubs, AckTags).
 
 props(Props) ->
     Props#message_properties{needs_confirming = false}.
-
-msg_id(#basic_message{ id = Id }) ->
-    Id.

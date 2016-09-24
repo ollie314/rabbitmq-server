@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_msg_store).
@@ -91,6 +91,8 @@
           flying_ets,
           %% set of dying clients
           dying_clients,
+          %% index of file positions for client death messages
+          dying_client_index,
           %% map of references of all registered clients
           %% to callbacks
           clients,
@@ -131,24 +133,28 @@
           msg_store
         }).
 
-%%----------------------------------------------------------------------------
+-record(dying_client,
+        { client_ref,
+          file,
+          offset
+        }).
 
--ifdef(use_specs).
+%%----------------------------------------------------------------------------
 
 -export_type([gc_state/0, file_num/0]).
 
--type(gc_state() :: #gc_state { dir              :: file:filename(),
+-type gc_state() :: #gc_state { dir              :: file:filename(),
                                 index_module     :: atom(),
                                 index_state      :: any(),
                                 file_summary_ets :: ets:tid(),
                                 file_handles_ets :: ets:tid(),
                                 msg_store        :: server()
-                              }).
+                              }.
 
--type(server() :: pid() | atom()).
--type(client_ref() :: binary()).
--type(file_num() :: non_neg_integer()).
--type(client_msstate() :: #client_msstate {
+-type server() :: pid() | atom().
+-type client_ref() :: binary().
+-type file_num() :: non_neg_integer().
+-type client_msstate() :: #client_msstate {
                       server             :: server(),
                       client_ref         :: client_ref(),
                       file_handle_cache  :: dict:dict(),
@@ -160,43 +166,41 @@
                       file_summary_ets   :: ets:tid(),
                       cur_file_cache_ets :: ets:tid(),
                       flying_ets         :: ets:tid(),
-                      credit_disc_bound  :: {pos_integer(), pos_integer()}}).
--type(msg_ref_delta_gen(A) ::
+                      credit_disc_bound  :: {pos_integer(), pos_integer()}}.
+-type msg_ref_delta_gen(A) ::
         fun ((A) -> 'finished' |
-                    {rabbit_types:msg_id(), non_neg_integer(), A})).
--type(maybe_msg_id_fun() ::
-        'undefined' | fun ((gb_sets:set(), 'written' | 'ignored') -> any())).
--type(maybe_close_fds_fun() :: 'undefined' | fun (() -> 'ok')).
--type(deletion_thunk() :: fun (() -> boolean())).
+                    {rabbit_types:msg_id(), non_neg_integer(), A}).
+-type maybe_msg_id_fun() ::
+        'undefined' | fun ((gb_sets:set(), 'written' | 'ignored') -> any()).
+-type maybe_close_fds_fun() :: 'undefined' | fun (() -> 'ok').
+-type deletion_thunk() :: fun (() -> boolean()).
 
--spec(start_link/4 ::
+-spec start_link
         (atom(), file:filename(), [binary()] | 'undefined',
-         {msg_ref_delta_gen(A), A}) -> rabbit_types:ok_pid_or_error()).
--spec(successfully_recovered_state/1 :: (server()) -> boolean()).
--spec(client_init/4 :: (server(), client_ref(), maybe_msg_id_fun(),
-                        maybe_close_fds_fun()) -> client_msstate()).
--spec(client_terminate/1 :: (client_msstate()) -> 'ok').
--spec(client_delete_and_terminate/1 :: (client_msstate()) -> 'ok').
--spec(client_ref/1 :: (client_msstate()) -> client_ref()).
--spec(close_all_indicated/1 ::
-        (client_msstate()) -> rabbit_types:ok(client_msstate())).
--spec(write/3 :: (rabbit_types:msg_id(), msg(), client_msstate()) -> 'ok').
--spec(write_flow/3 :: (rabbit_types:msg_id(), msg(), client_msstate()) -> 'ok').
--spec(read/2 :: (rabbit_types:msg_id(), client_msstate()) ->
-                     {rabbit_types:ok(msg()) | 'not_found', client_msstate()}).
--spec(contains/2 :: (rabbit_types:msg_id(), client_msstate()) -> boolean()).
--spec(remove/2 :: ([rabbit_types:msg_id()], client_msstate()) -> 'ok').
+         {msg_ref_delta_gen(A), A}) -> rabbit_types:ok_pid_or_error().
+-spec successfully_recovered_state(server()) -> boolean().
+-spec client_init(server(), client_ref(), maybe_msg_id_fun(),
+                        maybe_close_fds_fun()) -> client_msstate().
+-spec client_terminate(client_msstate()) -> 'ok'.
+-spec client_delete_and_terminate(client_msstate()) -> 'ok'.
+-spec client_ref(client_msstate()) -> client_ref().
+-spec close_all_indicated
+        (client_msstate()) -> rabbit_types:ok(client_msstate()).
+-spec write(rabbit_types:msg_id(), msg(), client_msstate()) -> 'ok'.
+-spec write_flow(rabbit_types:msg_id(), msg(), client_msstate()) -> 'ok'.
+-spec read(rabbit_types:msg_id(), client_msstate()) ->
+                     {rabbit_types:ok(msg()) | 'not_found', client_msstate()}.
+-spec contains(rabbit_types:msg_id(), client_msstate()) -> boolean().
+-spec remove([rabbit_types:msg_id()], client_msstate()) -> 'ok'.
 
--spec(set_maximum_since_use/2 :: (server(), non_neg_integer()) -> 'ok').
--spec(has_readers/2 :: (non_neg_integer(), gc_state()) -> boolean()).
--spec(combine_files/3 :: (non_neg_integer(), non_neg_integer(), gc_state()) ->
-                              deletion_thunk()).
--spec(delete_file/2 :: (non_neg_integer(), gc_state()) -> deletion_thunk()).
--spec(force_recovery/2 :: (file:filename(), server()) -> 'ok').
--spec(transform_dir/3 :: (file:filename(), server(),
-        fun ((any()) -> (rabbit_types:ok_or_error2(msg(), any())))) -> 'ok').
-
--endif.
+-spec set_maximum_since_use(server(), non_neg_integer()) -> 'ok'.
+-spec has_readers(non_neg_integer(), gc_state()) -> boolean().
+-spec combine_files(non_neg_integer(), non_neg_integer(), gc_state()) ->
+                              deletion_thunk().
+-spec delete_file(non_neg_integer(), gc_state()) -> deletion_thunk().
+-spec force_recovery(file:filename(), server()) -> 'ok'.
+-spec transform_dir(file:filename(), server(),
+        fun ((any()) -> (rabbit_types:ok_or_error2(msg(), any())))) -> 'ok'.
 
 %%----------------------------------------------------------------------------
 
@@ -419,6 +423,10 @@
 %% small as possible. Inspecting the set of all clients would degrade
 %% performance with many healthy clients and few, if any, dying
 %% clients, which is the typical case.
+%%
+%% Client termination messages are stored in a separate ets index to
+%% avoid filling primary message store index and message files with
+%% client termination messages.
 %%
 %% When the msg_store has a backlog (i.e. it has unprocessed messages
 %% in its mailbox / gen_server priority queue), a further optimisation
@@ -691,7 +699,9 @@ client_update_flying(Diff, MsgId, #client_msstate { flying_ets = FlyingEts,
     end.
 
 clear_client(CRef, State = #msstate { cref_to_msg_ids = CTM,
-                                      dying_clients = DyingClients }) ->
+                                      dying_clients = DyingClients,
+                                      dying_client_index = DyingIndex }) ->
+    ets:delete(DyingIndex, CRef),
     State #msstate { cref_to_msg_ids = dict:erase(CRef, CTM),
                      dying_clients = sets:del_element(CRef, DyingClients) }.
 
@@ -745,6 +755,8 @@ init([Server, BaseDir, ClientRefs, StartupFunState]) ->
                               [ordered_set, public]),
     CurFileCacheEts = ets:new(rabbit_msg_store_cur_file, [set, public]),
     FlyingEts       = ets:new(rabbit_msg_store_flying, [set, public]),
+    DyingIndex      = ets:new(rabbit_msg_store_dying_client_index,
+                              [set, public, {keypos, #dying_client.client_ref}]),
 
     {ok, FileSizeLimit} = application:get_env(msg_store_file_size_limit),
 
@@ -776,6 +788,7 @@ init([Server, BaseDir, ClientRefs, StartupFunState]) ->
                        cur_file_cache_ets     = CurFileCacheEts,
                        flying_ets             = FlyingEts,
                        dying_clients          = sets:new(),
+                       dying_client_index     = DyingIndex,
                        clients                = Clients,
                        successfully_recovered = CleanShutdown,
                        file_size_limit        = FileSizeLimit,
@@ -852,15 +865,21 @@ handle_call({contains, MsgId}, From, State) ->
     noreply(State1).
 
 handle_cast({client_dying, CRef},
-            State = #msstate { dying_clients = DyingClients }) ->
+            State = #msstate { dying_clients       = DyingClients,
+                               dying_client_index  = DyingIndex,
+                               current_file_handle = CurHdl,
+                               current_file        = CurFile }) ->
     DyingClients1 = sets:add_element(CRef, DyingClients),
-    noreply(write_message(CRef, <<>>,
-                          State #msstate { dying_clients = DyingClients1 }));
+    {ok, CurOffset} = file_handle_cache:current_virtual_offset(CurHdl),
+    true = ets:insert_new(DyingIndex, #dying_client{client_ref = CRef,
+                                                    file = CurFile,
+                                                    offset = CurOffset}),
+    noreply(State #msstate { dying_clients = DyingClients1 });
 
 handle_cast({client_delete, CRef},
             State = #msstate { clients = Clients }) ->
     State1 = State #msstate { clients = dict:erase(CRef, Clients) },
-    noreply(remove_message(CRef, CRef, clear_client(CRef, State1)));
+    noreply(clear_client(CRef, State1));
 
 handle_cast({write, CRef, MsgId, Flow},
             State = #msstate { cur_file_cache_ets = CurFileCacheEts,
@@ -1338,7 +1357,8 @@ blind_confirm(CRef, MsgIds, ActionTaken, State) ->
 %% msg and thus should be ignored. Note that this (correctly) returns
 %% false when testing to remove the death msg itself.
 should_mask_action(CRef, MsgId,
-                   State = #msstate { dying_clients = DyingClients }) ->
+                   State = #msstate { dying_clients = DyingClients,
+                                      dying_client_index = DyingIndex }) ->
     case {sets:is_element(CRef, DyingClients), index_lookup(MsgId, State)} of
         {false, Location} ->
             {false, Location};
@@ -1346,8 +1366,8 @@ should_mask_action(CRef, MsgId,
             {true, not_found};
         {true, #msg_location { file = File, offset = Offset,
                                ref_count = RefCount } = Location} ->
-            #msg_location { file = DeathFile, offset = DeathOffset } =
-                index_lookup(CRef, State),
+            [#dying_client { file = DeathFile, offset = DeathOffset }] =
+                ets:lookup(DyingIndex, CRef),
             {case {{DeathFile, DeathOffset} < {File, Offset}, RefCount} of
                  {true,  _} -> true;
                  {false, 0} -> false_if_increment;
@@ -1360,9 +1380,10 @@ should_mask_action(CRef, MsgId,
 %%----------------------------------------------------------------------------
 
 open_file(Dir, FileName, Mode) ->
-    file_handle_cache:open(form_filename(Dir, FileName), ?BINARY_MODE ++ Mode,
-                           [{write_buffer, ?HANDLE_CACHE_BUFFER_SIZE},
-                            {read_buffer,  ?HANDLE_CACHE_BUFFER_SIZE}]).
+    file_handle_cache:open_with_absolute_path(
+      form_filename(Dir, FileName), ?BINARY_MODE ++ Mode,
+      [{write_buffer, ?HANDLE_CACHE_BUFFER_SIZE},
+       {read_buffer,  ?HANDLE_CACHE_BUFFER_SIZE}]).
 
 close_handle(Key, CState = #client_msstate { file_handle_cache = FHC }) ->
     CState #client_msstate { file_handle_cache = close_handle(Key, FHC) };
@@ -2112,10 +2133,11 @@ transform_dir(BaseDir, Store, TransformFun) ->
 
 transform_msg_file(FileOld, FileNew, TransformFun) ->
     ok = rabbit_file:ensure_parent_dirs_exist(FileNew),
-    {ok, RefOld} = file_handle_cache:open(FileOld, [raw, binary, read], []),
-    {ok, RefNew} = file_handle_cache:open(FileNew, [raw, binary, write],
-                                          [{write_buffer,
-                                            ?HANDLE_CACHE_BUFFER_SIZE}]),
+    {ok, RefOld} = file_handle_cache:open_with_absolute_path(
+                     FileOld, [raw, binary, read], []),
+    {ok, RefNew} = file_handle_cache:open_with_absolute_path(
+                     FileNew, [raw, binary, write],
+                     [{write_buffer, ?HANDLE_CACHE_BUFFER_SIZE}]),
     {ok, _Acc, _IgnoreSize} =
         rabbit_msg_file:scan(
           RefOld, filelib:file_size(FileOld),

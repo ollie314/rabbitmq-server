@@ -11,14 +11,24 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_connection_sup).
 
--behaviour(supervisor2).
+%% Supervisor for a (network) AMQP 0-9-1 client connection.
+%%
+%% Supervises
+%%
+%%  * rabbit_reader
+%%  * Auxiliary process supervisor
+%%
+%% See also rabbit_reader, rabbit_connection_helper_sup.
 
--export([start_link/0, reader/1]).
+-behaviour(supervisor2).
+-behaviour(ranch_protocol).
+
+-export([start_link/4, reader/1]).
 
 -export([init/1]).
 
@@ -26,16 +36,13 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/0 :: () -> {'ok', pid(), pid()}).
--spec(reader/1 :: (pid()) -> pid()).
-
--endif.
+-spec start_link(any(), rabbit_net:socket(), module(), any()) ->
+          {'ok', pid(), pid()}.
+-spec reader(pid()) -> pid().
 
 %%--------------------------------------------------------------------------
 
-start_link() ->
+start_link(Ref, Sock, _Transport, _Opts) ->
     {ok, SupPid} = supervisor2:start_link(?MODULE, []),
     %% We need to get channels in the hierarchy here so they get shut
     %% down after the reader, so the reader gets a chance to terminate
@@ -55,8 +62,8 @@ start_link() ->
     {ok, ReaderPid} =
         supervisor2:start_child(
           SupPid,
-          {reader, {rabbit_reader, start_link, [HelperSup]},
-           intrinsic, ?MAX_WAIT, worker, [rabbit_reader]}),
+          {reader, {rabbit_reader, start_link, [HelperSup, Ref, Sock]},
+           intrinsic, ?WORKER_WAIT, worker, [rabbit_reader]}),
     {ok, SupPid, ReaderPid}.
 
 reader(Pid) ->

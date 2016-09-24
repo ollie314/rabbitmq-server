@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_guid).
@@ -32,20 +32,16 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([guid/0]).
 
--type(guid() :: binary()).
+-type guid() :: binary().
 
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
--spec(filename/0 :: () -> string()).
--spec(gen/0 :: () -> guid()).
--spec(gen_secure/0 :: () -> guid()).
--spec(string/2 :: (guid(), any()) -> string()).
--spec(binary/2 :: (guid(), any()) -> binary()).
-
--endif.
+-spec start_link() -> rabbit_types:ok_pid_or_error().
+-spec filename() -> string().
+-spec gen() -> guid().
+-spec gen_secure() -> guid().
+-spec string(guid(), any()) -> string().
+-spec binary(guid(), any()) -> binary().
 
 %%----------------------------------------------------------------------------
 

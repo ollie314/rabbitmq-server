@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_upgrade).
@@ -26,14 +26,11 @@
 
 %% -------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(maybe_upgrade_mnesia/0 :: () -> 'ok').
--spec(maybe_upgrade_local/0 :: () -> 'ok' |
-                                     'version_not_available' |
-                                     'starting_from_scratch').
-
--endif.
+-spec maybe_upgrade_mnesia() -> 'ok'.
+-spec maybe_upgrade_local() ->
+          'ok' |
+          'version_not_available' |
+          'starting_from_scratch'.
 
 %% -------------------------------------------------------------------
 
@@ -100,7 +97,12 @@ ensure_backup_taken() ->
                      false -> ok = take_backup();
                      _     -> ok
                  end;
-        true  -> throw({error, previous_upgrade_failed})
+        true  ->
+          error("Found lock file at ~s.
+            Either previous upgrade is in progress or has failed.
+            Database backup path: ~s",
+            [lock_filename(), backup_dir()]),
+          throw({error, previous_upgrade_failed})
     end.
 
 take_backup() ->
@@ -108,7 +110,7 @@ take_backup() ->
     case rabbit_mnesia:copy_db(BackupDir) of
         ok         -> info("upgrades: Mnesia dir backed up to ~p~n",
                            [BackupDir]);
-        {error, E} -> throw({could_not_back_up_mnesia_dir, E})
+        {error, E} -> throw({could_not_back_up_mnesia_dir, E, BackupDir})
     end.
 
 ensure_backup_removed() ->

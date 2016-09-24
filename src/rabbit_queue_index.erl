@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_queue_index).
@@ -193,20 +193,18 @@
 -rabbit_upgrade({store_msg_size, local, [avoid_zeroes]}).
 -rabbit_upgrade({store_msg,      local, [store_msg_size]}).
 
--ifdef(use_specs).
-
--type(hdl() :: ('undefined' | any())).
--type(segment() :: ('undefined' |
+-type hdl() :: ('undefined' | any()).
+-type segment() :: ('undefined' |
                     #segment { num                :: non_neg_integer(),
                                path               :: file:filename(),
                                journal_entries    :: array:array(),
                                entries_to_segment :: array:array(),
                                unacked            :: non_neg_integer()
-                             })).
--type(seq_id() :: integer()).
--type(seg_dict() :: {dict:dict(), [segment()]}).
--type(on_sync_fun() :: fun ((gb_sets:set()) -> ok)).
--type(qistate() :: #qistate { dir                 :: file:filename(),
+                             }).
+-type seq_id() :: integer().
+-type seg_dict() :: {dict:dict(), [segment()]}.
+-type on_sync_fun() :: fun ((gb_sets:set()) -> ok).
+-type qistate() :: #qistate { dir                 :: file:filename(),
                               segments            :: 'undefined' | seg_dict(),
                               journal_handle      :: hdl(),
                               dirty_count         :: integer(),
@@ -217,43 +215,41 @@
                               unconfirmed_msg     :: gb_sets:set(),
                               pre_publish_cache   :: list(),
                               delivered_cache     :: list()
-                            }).
--type(contains_predicate() :: fun ((rabbit_types:msg_id()) -> boolean())).
--type(walker(A) :: fun ((A) -> 'finished' |
-                               {rabbit_types:msg_id(), non_neg_integer(), A})).
--type(shutdown_terms() :: [term()] | 'non_clean_shutdown').
+                            }.
+-type contains_predicate() :: fun ((rabbit_types:msg_id()) -> boolean()).
+-type walker(A) :: fun ((A) -> 'finished' |
+                               {rabbit_types:msg_id(), non_neg_integer(), A}).
+-type shutdown_terms() :: [term()] | 'non_clean_shutdown'.
 
--spec(erase/1 :: (rabbit_amqqueue:name()) -> 'ok').
--spec(reset_state/1 :: (qistate()) -> qistate()).
--spec(init/3 :: (rabbit_amqqueue:name(),
-                 on_sync_fun(), on_sync_fun()) -> qistate()).
--spec(recover/6 :: (rabbit_amqqueue:name(), shutdown_terms(), boolean(),
+-spec erase(rabbit_amqqueue:name()) -> 'ok'.
+-spec reset_state(qistate()) -> qistate().
+-spec init(rabbit_amqqueue:name(),
+                 on_sync_fun(), on_sync_fun()) -> qistate().
+-spec recover(rabbit_amqqueue:name(), shutdown_terms(), boolean(),
                     contains_predicate(),
                     on_sync_fun(), on_sync_fun()) ->
                         {'undefined' | non_neg_integer(),
-                         'undefined' | non_neg_integer(), qistate()}).
--spec(terminate/2 :: ([any()], qistate()) -> qistate()).
--spec(delete_and_terminate/1 :: (qistate()) -> qistate()).
--spec(publish/6 :: (rabbit_types:msg_id(), seq_id(),
+                         'undefined' | non_neg_integer(), qistate()}.
+-spec terminate([any()], qistate()) -> qistate().
+-spec delete_and_terminate(qistate()) -> qistate().
+-spec publish(rabbit_types:msg_id(), seq_id(),
                     rabbit_types:message_properties(), boolean(),
-                    non_neg_integer(), qistate()) -> qistate()).
--spec(deliver/2 :: ([seq_id()], qistate()) -> qistate()).
--spec(ack/2 :: ([seq_id()], qistate()) -> qistate()).
--spec(sync/1 :: (qistate()) -> qistate()).
--spec(needs_sync/1 :: (qistate()) -> 'confirms' | 'other' | 'false').
--spec(flush/1 :: (qistate()) -> qistate()).
--spec(read/3 :: (seq_id(), seq_id(), qistate()) ->
+                    non_neg_integer(), qistate()) -> qistate().
+-spec deliver([seq_id()], qistate()) -> qistate().
+-spec ack([seq_id()], qistate()) -> qistate().
+-spec sync(qistate()) -> qistate().
+-spec needs_sync(qistate()) -> 'confirms' | 'other' | 'false'.
+-spec flush(qistate()) -> qistate().
+-spec read(seq_id(), seq_id(), qistate()) ->
                      {[{rabbit_types:msg_id(), seq_id(),
                         rabbit_types:message_properties(),
-                        boolean(), boolean()}], qistate()}).
--spec(next_segment_boundary/1 :: (seq_id()) -> seq_id()).
--spec(bounds/1 :: (qistate()) ->
-                       {non_neg_integer(), non_neg_integer(), qistate()}).
--spec(start/1 :: ([rabbit_amqqueue:name()]) -> {[[any()]], {walker(A), A}}).
+                        boolean(), boolean()}], qistate()}.
+-spec next_segment_boundary(seq_id()) -> seq_id().
+-spec bounds(qistate()) ->
+                       {non_neg_integer(), non_neg_integer(), qistate()}.
+-spec start([rabbit_amqqueue:name()]) -> {[[any()]], {walker(A), A}}.
 
--spec(add_queue_ttl/0 :: () -> 'ok').
-
--endif.
+-spec add_queue_ttl() -> 'ok'.
 
 
 %%----------------------------------------------------------------------------
@@ -306,24 +302,9 @@ delete_and_terminate(State) ->
     State1.
 
 pre_publish(MsgOrId, SeqId, MsgProps, IsPersistent, IsDelivered, JournalSizeHint,
-            State = #qistate{unconfirmed       = UC,
-                             unconfirmed_msg   = UCM,
-                             pre_publish_cache = PPC,
+            State = #qistate{pre_publish_cache = PPC,
                              delivered_cache   = DC}) ->
-    MsgId = case MsgOrId of
-                #basic_message{id = Id} -> Id;
-                Id when is_binary(Id)   -> Id
-            end,
-    ?MSG_ID_BYTES = size(MsgId),
-
-    State1 =
-        case {MsgProps#message_properties.needs_confirming, MsgOrId} of
-            {true,  MsgId} -> UC1  = gb_sets:add_element(MsgId, UC),
-                              State#qistate{unconfirmed     = UC1};
-            {true,  _}     -> UCM1 = gb_sets:add_element(MsgId, UCM),
-                              State#qistate{unconfirmed_msg = UCM1};
-            {false, _}     -> State
-        end,
+    State1 = maybe_needs_confirming(MsgProps, MsgOrId, State),
 
     {Bin, MsgBin} = create_pub_record_body(MsgOrId, MsgProps),
 
@@ -377,23 +358,10 @@ flush_delivered_cache(State = #qistate{delivered_cache = DC}) ->
     State1 = deliver(lists:reverse(DC), State),
     State1#qistate{delivered_cache = []}.
 
-publish(MsgOrId, SeqId, MsgProps, IsPersistent, JournalSizeHint,
-        State = #qistate{unconfirmed     = UC,
-                         unconfirmed_msg = UCM}) ->
-    MsgId = case MsgOrId of
-                #basic_message{id = Id} -> Id;
-                Id when is_binary(Id)   -> Id
-            end,
-    ?MSG_ID_BYTES = size(MsgId),
+publish(MsgOrId, SeqId, MsgProps, IsPersistent, JournalSizeHint, State) ->
     {JournalHdl, State1} =
         get_journal_handle(
-          case {MsgProps#message_properties.needs_confirming, MsgOrId} of
-              {true,  MsgId} -> UC1  = gb_sets:add_element(MsgId, UC),
-                                State#qistate{unconfirmed     = UC1};
-              {true,  _}     -> UCM1 = gb_sets:add_element(MsgId, UCM),
-                                State#qistate{unconfirmed_msg = UCM1};
-              {false, _}     -> State
-          end),
+          maybe_needs_confirming(MsgProps, MsgOrId, State)),
     file_handle_cache_stats:update(queue_index_journal_write),
     {Bin, MsgBin} = create_pub_record_body(MsgOrId, MsgProps),
     ok = file_handle_cache:append(
@@ -406,6 +374,22 @@ publish(MsgOrId, SeqId, MsgProps, IsPersistent, JournalSizeHint,
     maybe_flush_journal(
       JournalSizeHint,
       add_to_journal(SeqId, {IsPersistent, Bin, MsgBin}, State1)).
+
+maybe_needs_confirming(MsgProps, MsgOrId,
+        State = #qistate{unconfirmed     = UC,
+                         unconfirmed_msg = UCM}) ->
+    MsgId = case MsgOrId of
+                #basic_message{id = Id} -> Id;
+                Id when is_binary(Id)   -> Id
+            end,
+    ?MSG_ID_BYTES = size(MsgId),
+    case {MsgProps#message_properties.needs_confirming, MsgOrId} of
+      {true,  MsgId} -> UC1  = gb_sets:add_element(MsgId, UC),
+                        State#qistate{unconfirmed     = UC1};
+      {true,  _}     -> UCM1 = gb_sets:add_element(MsgId, UCM),
+                        State#qistate{unconfirmed_msg = UCM1};
+      {false, _}     -> State
+    end.
 
 deliver(SeqIds, State) ->
     deliver_or_ack(del, SeqIds, State).
@@ -828,8 +812,9 @@ append_journal_to_segment(#segment { journal_entries = JEntries,
         _ ->
             file_handle_cache_stats:update(queue_index_write),
 
-            {ok, Hdl} = file_handle_cache:open(Path, ?WRITE_MODE,
-                                               [{write_buffer, infinity}]),
+            {ok, Hdl} = file_handle_cache:open_with_absolute_path(
+                          Path, ?WRITE_MODE,
+                          [{write_buffer, infinity}]),
             %% the file_handle_cache also does a list reverse, so this
             %% might not be required here, but before we were doing a
             %% sparse_foldr, a lists:reverse/1 seems to be the correct
@@ -844,8 +829,8 @@ get_journal_handle(State = #qistate { journal_handle = undefined,
                                       dir = Dir }) ->
     Path = filename:join(Dir, ?JOURNAL_FILENAME),
     ok = rabbit_file:ensure_dir(Path),
-    {ok, Hdl} = file_handle_cache:open(Path, ?WRITE_MODE,
-                                       [{write_buffer, infinity}]),
+    {ok, Hdl} = file_handle_cache:open_with_absolute_path(
+                  Path, ?WRITE_MODE, [{write_buffer, infinity}]),
     {Hdl, State #qistate { journal_handle = Hdl }};
 get_journal_handle(State = #qistate { journal_handle = Hdl }) ->
     {Hdl, State}.
@@ -1070,7 +1055,8 @@ load_segment(KeepAcked, #segment { path = Path }) ->
         false -> Empty;
         true  -> Size = rabbit_file:file_size(Path),
                  file_handle_cache_stats:update(queue_index_read),
-                 {ok, Hdl} = file_handle_cache:open(Path, ?READ_MODE, []),
+                 {ok, Hdl} = file_handle_cache:open_with_absolute_path(
+                               Path, ?READ_MODE, []),
                  {ok, 0} = file_handle_cache:position(Hdl, bof),
                  {ok, SegBin} = file_handle_cache:read(Hdl, Size),
                  ok = file_handle_cache:close(Hdl),
@@ -1395,10 +1381,11 @@ transform_file(Path, Fun) when is_function(Fun)->
     case rabbit_file:file_size(Path) of
         0    -> ok;
         Size -> {ok, PathTmpHdl} =
-                    file_handle_cache:open(PathTmp, ?WRITE_MODE,
-                                           [{write_buffer, infinity}]),
+                    file_handle_cache:open_with_absolute_path(
+                      PathTmp, ?WRITE_MODE,
+                      [{write_buffer, infinity}]),
 
-                {ok, PathHdl} = file_handle_cache:open(
+                {ok, PathHdl} = file_handle_cache:open_with_absolute_path(
                                   Path, ?READ_MODE, [{read_buffer, Size}]),
                 {ok, Content} = file_handle_cache:read(PathHdl, Size),
                 ok = file_handle_cache:close(PathHdl),

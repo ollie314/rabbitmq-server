@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_exchange_type_headers).
@@ -24,6 +24,7 @@
 -export([validate/1, validate_binding/2,
          create/2, delete/3, policy_changed/2, add_binding/3,
          remove_bindings/3, assert_args_equivalence/2]).
+-export([info/1, info/2]).
 
 -rabbit_boot_step({?MODULE,
                    [{description, "exchange type headers"},
@@ -32,10 +33,12 @@
                     {requires,    rabbit_registry},
                     {enables,     kernel_ready}]}).
 
--ifdef(use_specs).
--spec(headers_match/2 :: (rabbit_framing:amqp_table(),
-                          rabbit_framing:amqp_table()) -> boolean()).
--endif.
+-spec headers_match
+        (rabbit_framing:amqp_table(), rabbit_framing:amqp_table()) ->
+            boolean().
+
+info(_X) -> [].
+info(_X, _) -> [].
 
 description() ->
     [{description, <<"AMQP headers exchange, as per the AMQP specification">>}].
@@ -85,35 +88,51 @@ headers_match(Args, Data) ->
     MK = parse_x_match(rabbit_misc:table_lookup(Args, <<"x-match">>)),
     headers_match(Args, Data, true, false, MK).
 
-headers_match([], _Data, AllMatch, _AnyMatch, all) ->
-    AllMatch;
-headers_match([], _Data, _AllMatch, AnyMatch, any) ->
-    AnyMatch;
+% A bit less horrendous algorithm :)
+headers_match(_, _, false, _, all) -> false;
+headers_match(_, _, _, true, any) -> true;
+
+% No more bindings, return current state
+headers_match([], _Data, AllMatch, _AnyMatch, all) -> AllMatch;
+headers_match([], _Data, _AllMatch, AnyMatch, any) -> AnyMatch;
+
+% Delete bindings starting with x-
 headers_match([{<<"x-", _/binary>>, _PT, _PV} | PRest], Data,
               AllMatch, AnyMatch, MatchKind) ->
     headers_match(PRest, Data, AllMatch, AnyMatch, MatchKind);
+
+% No more data, but still bindings, false with all
 headers_match(_Pattern, [], _AllMatch, AnyMatch, MatchKind) ->
     headers_match([], [], false, AnyMatch, MatchKind);
+
+% Data key header not in binding, go next data
 headers_match(Pattern = [{PK, _PT, _PV} | _], [{DK, _DT, _DV} | DRest],
               AllMatch, AnyMatch, MatchKind) when PK > DK ->
     headers_match(Pattern, DRest, AllMatch, AnyMatch, MatchKind);
+
+% Binding key header not in data, false with all, go next binding
 headers_match([{PK, _PT, _PV} | PRest], Data = [{DK, _DT, _DV} | _],
               _AllMatch, AnyMatch, MatchKind) when PK < DK ->
     headers_match(PRest, Data, false, AnyMatch, MatchKind);
-headers_match([{PK, PT, PV} | PRest], [{DK, DT, DV} | DRest],
-              AllMatch, AnyMatch, MatchKind) when PK == DK ->
-    {AllMatch1, AnyMatch1} =
-        case rabbit_misc:type_class(PT) == rabbit_misc:type_class(DT) of
-            %% It's not properly specified, but a "no value" in a
-            %% pattern field is supposed to mean simple presence of
-            %% the corresponding data field. I've interpreted that to
-            %% mean a type of "void" for the pattern field.
-            _ when PT == void -> {AllMatch, true};
-            false             -> {false, AnyMatch};
-            _ when PV == DV   -> {AllMatch, true};
-            _                 -> {false, AnyMatch}
-        end,
-    headers_match(PRest, DRest, AllMatch1, AnyMatch1, MatchKind).
+
+%% It's not properly specified, but a "no value" in a
+%% pattern field is supposed to mean simple presence of
+%% the corresponding data field. I've interpreted that to
+%% mean a type of "void" for the pattern field.
+headers_match([{PK, void, _PV} | PRest], [{DK, _DT, _DV} | DRest],
+              AllMatch, _AnyMatch, MatchKind) when PK == DK ->
+    headers_match(PRest, DRest, AllMatch, true, MatchKind);
+
+% Complete match, true with any, go next
+headers_match([{PK, _PT, PV} | PRest], [{DK, _DT, DV} | DRest],
+              AllMatch, _AnyMatch, MatchKind) when PK == DK andalso PV == DV ->
+    headers_match(PRest, DRest, AllMatch, true, MatchKind);
+
+% Value does not match, false with all, go next
+headers_match([{PK, _PT, _PV} | PRest], [{DK, _DT, _DV} | DRest],
+              _AllMatch, AnyMatch, MatchKind) when PK == DK ->
+    headers_match(PRest, DRest, false, AnyMatch, MatchKind).
+
 
 validate(_X) -> ok.
 create(_Tx, _X) -> ok.

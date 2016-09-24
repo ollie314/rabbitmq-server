@@ -11,10 +11,19 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_connection_helper_sup).
+
+%% Supervises auxiliary processes of AMQP 0-9-1 connections:
+%%
+%%  * Channel supervisor
+%%  * Heartbeat receiver
+%%  * Heartbeat sender
+%%  * Exclusive queue collector
+%%
+%% See also rabbit_heartbeat, rabbit_channel_sup_sup, rabbit_queue_collector.
 
 -behaviour(supervisor2).
 
@@ -28,12 +37,10 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
--spec(start_channel_sup_sup/1 :: (pid()) -> rabbit_types:ok_pid_or_error()).
--spec(start_queue_collector/2 :: (pid(), rabbit_types:proc_name()) ->
-                                      rabbit_types:ok_pid_or_error()).
--endif.
+-spec start_link() -> rabbit_types:ok_pid_or_error().
+-spec start_channel_sup_sup(pid()) -> rabbit_types:ok_pid_or_error().
+-spec start_queue_collector(pid(), rabbit_types:proc_name()) ->
+          rabbit_types:ok_pid_or_error().
 
 %%----------------------------------------------------------------------------
 
@@ -50,10 +57,9 @@ start_queue_collector(SupPid, Identity) ->
     supervisor2:start_child(
       SupPid,
       {collector, {rabbit_queue_collector, start_link, [Identity]},
-       intrinsic, ?MAX_WAIT, worker, [rabbit_queue_collector]}).
+       intrinsic, ?WORKER_WAIT, worker, [rabbit_queue_collector]}).
 
 %%----------------------------------------------------------------------------
 
 init([]) ->
     {ok, {{one_for_one, 10, 10}, []}}.
-

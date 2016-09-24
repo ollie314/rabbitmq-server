@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_binding).
@@ -22,83 +22,85 @@
          list_for_source_and_destination/2]).
 -export([new_deletions/0, combine_deletions/2, add_deletion/3,
          process_deletions/1]).
--export([info_keys/0, info/1, info/2, info_all/1, info_all/2]).
+-export([info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4]).
 %% these must all be run inside a mnesia tx
 -export([has_for_source/1, remove_for_source/1,
          remove_for_destination/2, remove_transient_for_destination/1]).
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([key/0, deletions/0]).
 
--type(key() :: binary()).
+-type key() :: binary().
 
--type(bind_errors() :: rabbit_types:error(
+-type bind_errors() :: rabbit_types:error(
                          {'resources_missing',
                           [{'not_found', (rabbit_types:binding_source() |
                                           rabbit_types:binding_destination())} |
-                           {'absent', rabbit_types:amqqueue()}]})).
+                           {'absent', rabbit_types:amqqueue()}]}).
 
--type(bind_ok_or_error() :: 'ok' | bind_errors() |
+-type bind_ok_or_error() :: 'ok' | bind_errors() |
                             rabbit_types:error(
                               'binding_not_found' |
-                              {'binding_invalid', string(), [any()]})).
--type(bind_res() :: bind_ok_or_error() | rabbit_misc:thunk(bind_ok_or_error())).
--type(inner_fun() ::
+                              {'binding_invalid', string(), [any()]}).
+-type bind_res() :: bind_ok_or_error() | rabbit_misc:thunk(bind_ok_or_error()).
+-type inner_fun() ::
         fun((rabbit_types:exchange(),
              rabbit_types:exchange() | rabbit_types:amqqueue()) ->
-                   rabbit_types:ok_or_error(rabbit_types:amqp_error()))).
--type(bindings() :: [rabbit_types:binding()]).
+                   rabbit_types:ok_or_error(rabbit_types:amqp_error())).
+-type bindings() :: [rabbit_types:binding()].
 
 %% TODO this should really be opaque but that seems to confuse 17.1's
 %% dialyzer into objecting to everything that uses it.
--type(deletions() :: dict:dict()).
+-type deletions() :: dict:dict().
 
--spec(recover/2 :: ([rabbit_exchange:name()], [rabbit_amqqueue:name()]) ->
-                        'ok').
--spec(exists/1 :: (rabbit_types:binding()) -> boolean() | bind_errors()).
--spec(add/1    :: (rabbit_types:binding())              -> bind_res()).
--spec(add/2    :: (rabbit_types:binding(), inner_fun()) -> bind_res()).
--spec(remove/1 :: (rabbit_types:binding())              -> bind_res()).
--spec(remove/2 :: (rabbit_types:binding(), inner_fun()) -> bind_res()).
--spec(list/1 :: (rabbit_types:vhost()) -> bindings()).
--spec(list_for_source/1 ::
-        (rabbit_types:binding_source()) -> bindings()).
--spec(list_for_destination/1 ::
-        (rabbit_types:binding_destination()) -> bindings()).
--spec(list_for_source_and_destination/2 ::
+-spec recover([rabbit_exchange:name()], [rabbit_amqqueue:name()]) ->
+                        'ok'.
+-spec exists(rabbit_types:binding()) -> boolean() | bind_errors().
+-spec add(rabbit_types:binding())              -> bind_res().
+-spec add(rabbit_types:binding(), inner_fun()) -> bind_res().
+-spec remove(rabbit_types:binding())              -> bind_res().
+-spec remove(rabbit_types:binding(), inner_fun()) -> bind_res().
+-spec list(rabbit_types:vhost()) -> bindings().
+-spec list_for_source
+        (rabbit_types:binding_source()) -> bindings().
+-spec list_for_destination
+        (rabbit_types:binding_destination()) -> bindings().
+-spec list_for_source_and_destination
         (rabbit_types:binding_source(), rabbit_types:binding_destination()) ->
-                                                bindings()).
--spec(info_keys/0 :: () -> rabbit_types:info_keys()).
--spec(info/1 :: (rabbit_types:binding()) -> rabbit_types:infos()).
--spec(info/2 :: (rabbit_types:binding(), rabbit_types:info_keys()) ->
-                     rabbit_types:infos()).
--spec(info_all/1 :: (rabbit_types:vhost()) -> [rabbit_types:infos()]).
--spec(info_all/2 ::(rabbit_types:vhost(), rabbit_types:info_keys())
-                   -> [rabbit_types:infos()]).
--spec(has_for_source/1 :: (rabbit_types:binding_source()) -> boolean()).
--spec(remove_for_source/1 :: (rabbit_types:binding_source()) -> bindings()).
--spec(remove_for_destination/2 ::
-        (rabbit_types:binding_destination(), boolean()) -> deletions()).
--spec(remove_transient_for_destination/1 ::
-        (rabbit_types:binding_destination()) -> deletions()).
--spec(process_deletions/1 :: (deletions()) -> rabbit_misc:thunk('ok')).
--spec(combine_deletions/2 :: (deletions(), deletions()) -> deletions()).
--spec(add_deletion/3 :: (rabbit_exchange:name(),
-                         {'undefined' | rabbit_types:exchange(),
-                          'deleted' | 'not_deleted',
-                          bindings()}, deletions()) -> deletions()).
--spec(new_deletions/0 :: () -> deletions()).
-
--endif.
+                                                bindings().
+-spec info_keys() -> rabbit_types:info_keys().
+-spec info(rabbit_types:binding()) -> rabbit_types:infos().
+-spec info(rabbit_types:binding(), rabbit_types:info_keys()) ->
+          rabbit_types:infos().
+-spec info_all(rabbit_types:vhost()) -> [rabbit_types:infos()].
+-spec info_all(rabbit_types:vhost(), rabbit_types:info_keys()) ->
+          [rabbit_types:infos()].
+-spec info_all(rabbit_types:vhost(), rabbit_types:info_keys(),
+                    reference(), pid()) -> 'ok'.
+-spec has_for_source(rabbit_types:binding_source()) -> boolean().
+-spec remove_for_source(rabbit_types:binding_source()) -> bindings().
+-spec remove_for_destination
+        (rabbit_types:binding_destination(), boolean()) -> deletions().
+-spec remove_transient_for_destination
+        (rabbit_types:binding_destination()) -> deletions().
+-spec process_deletions(deletions()) -> rabbit_misc:thunk('ok').
+-spec combine_deletions(deletions(), deletions()) -> deletions().
+-spec add_deletion
+        (rabbit_exchange:name(),
+         {'undefined' | rabbit_types:exchange(),
+          'deleted' | 'not_deleted',
+          bindings()},
+         deletions()) ->
+            deletions().
+-spec new_deletions() -> deletions().
 
 %%----------------------------------------------------------------------------
 
 -define(INFO_KEYS, [source_name, source_kind,
                     destination_name, destination_kind,
-                    routing_key, arguments]).
+                    routing_key, arguments,
+                    vhost]).
 
 recover(XNames, QNames) ->
     rabbit_misc:table_filter(
@@ -270,6 +272,7 @@ infos(Items, B) -> [{Item, i(Item, B)} || Item <- Items].
 
 i(source_name,      #binding{source      = SrcName})    -> SrcName#resource.name;
 i(source_kind,      #binding{source      = SrcName})    -> SrcName#resource.kind;
+i(vhost,            #binding{source      = SrcName})    -> SrcName#resource.virtual_host;
 i(destination_name, #binding{destination = DstName})    -> DstName#resource.name;
 i(destination_kind, #binding{destination = DstName})    -> DstName#resource.kind;
 i(routing_key,      #binding{key         = RoutingKey}) -> RoutingKey;
@@ -283,6 +286,10 @@ info(B = #binding{}, Items) -> infos(Items, B).
 info_all(VHostPath) -> map(VHostPath, fun (B) -> info(B) end).
 
 info_all(VHostPath, Items) -> map(VHostPath, fun (B) -> info(B, Items) end).
+
+info_all(VHostPath, Items, Ref, AggregatorPid) ->
+    rabbit_control_misc:emitting_map(
+      AggregatorPid, Ref, fun(B) -> info(B, Items) end, list(VHostPath)).
 
 has_for_source(SrcName) ->
     Match = #route{binding = #binding{source = SrcName, _ = '_'}},

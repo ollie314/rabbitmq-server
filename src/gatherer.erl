@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(gatherer).
@@ -39,17 +39,13 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
--spec(stop/1 :: (pid()) -> 'ok').
--spec(fork/1 :: (pid()) -> 'ok').
--spec(finish/1 :: (pid()) -> 'ok').
--spec(in/2 :: (pid(), any()) -> 'ok').
--spec(sync_in/2 :: (pid(), any()) -> 'ok').
--spec(out/1 :: (pid()) -> {'value', any()} | 'empty').
-
--endif.
+-spec start_link() -> rabbit_types:ok_pid_or_error().
+-spec stop(pid()) -> 'ok'.
+-spec fork(pid()) -> 'ok'.
+-spec finish(pid()) -> 'ok'.
+-spec in(pid(), any()) -> 'ok'.
+-spec sync_in(pid(), any()) -> 'ok'.
+-spec out(pid()) -> {'value', any()} | 'empty'.
 
 %%----------------------------------------------------------------------------
 
@@ -120,8 +116,8 @@ handle_call(Msg, _From, State) ->
 handle_cast(finish, State = #gstate { forks = Forks, blocked = Blocked }) ->
     NewForks = Forks - 1,
     NewBlocked = case NewForks of
-                     0 -> [gen_server2:reply(From, empty) ||
-                              From <- queue:to_list(Blocked)],
+                     0 -> _ = [gen_server2:reply(From, empty) ||
+                                  From <- queue:to_list(Blocked)],
                           queue:new();
                      _ -> Blocked
                  end,

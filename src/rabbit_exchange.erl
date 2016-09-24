@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_exchange).
@@ -22,82 +22,81 @@
          assert_equivalence/6, assert_args_equivalence/2, check_type/1,
          lookup/1, lookup_or_die/1, list/0, list/1, lookup_scratch/2,
          update_scratch/3, update_decorators/1, immutable/1,
-         info_keys/0, info/1, info/2, info_all/1, info_all/2,
+         info_keys/0, info/1, info/2, info_all/1, info_all/2, info_all/4,
          route/2, delete/2, validate_binding/2]).
 %% these must be run inside a mnesia tx
 -export([maybe_auto_delete/2, serial/1, peek_serial/1, update/2]).
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([name/0, type/0]).
 
--type(name() :: rabbit_types:r('exchange')).
--type(type() :: atom()).
--type(fun_name() :: atom()).
+-type name() :: rabbit_types:r('exchange').
+-type type() :: atom().
+-type fun_name() :: atom().
 
--spec(recover/0 :: () -> [name()]).
--spec(callback/4::
+-spec recover() -> [name()].
+-spec callback
         (rabbit_types:exchange(), fun_name(),
-         fun((boolean()) -> non_neg_integer()) | atom(), [any()]) -> 'ok').
--spec(policy_changed/2 ::
-        (rabbit_types:exchange(), rabbit_types:exchange()) -> 'ok').
--spec(declare/6 ::
+         fun((boolean()) -> non_neg_integer()) | atom(), [any()]) -> 'ok'.
+-spec policy_changed
+        (rabbit_types:exchange(), rabbit_types:exchange()) -> 'ok'.
+-spec declare
         (name(), type(), boolean(), boolean(), boolean(),
          rabbit_framing:amqp_table())
-        -> rabbit_types:exchange()).
--spec(check_type/1 ::
-        (binary()) -> atom() | rabbit_types:connection_exit()).
--spec(assert_equivalence/6 ::
+        -> rabbit_types:exchange().
+-spec check_type
+        (binary()) -> atom() | rabbit_types:connection_exit().
+-spec assert_equivalence
         (rabbit_types:exchange(), atom(), boolean(), boolean(), boolean(),
          rabbit_framing:amqp_table())
-        -> 'ok' | rabbit_types:connection_exit()).
--spec(assert_args_equivalence/2 ::
+        -> 'ok' | rabbit_types:connection_exit().
+-spec assert_args_equivalence
         (rabbit_types:exchange(), rabbit_framing:amqp_table())
-        -> 'ok' | rabbit_types:connection_exit()).
--spec(lookup/1 ::
+        -> 'ok' | rabbit_types:connection_exit().
+-spec lookup
         (name()) -> rabbit_types:ok(rabbit_types:exchange()) |
-                    rabbit_types:error('not_found')).
--spec(lookup_or_die/1 ::
+                    rabbit_types:error('not_found').
+-spec lookup_or_die
         (name()) -> rabbit_types:exchange() |
-                    rabbit_types:channel_exit()).
--spec(list/0 :: () -> [rabbit_types:exchange()]).
--spec(list/1 :: (rabbit_types:vhost()) -> [rabbit_types:exchange()]).
--spec(lookup_scratch/2 :: (name(), atom()) ->
+                    rabbit_types:channel_exit().
+-spec list() -> [rabbit_types:exchange()].
+-spec list(rabbit_types:vhost()) -> [rabbit_types:exchange()].
+-spec lookup_scratch(name(), atom()) ->
                                rabbit_types:ok(term()) |
-                               rabbit_types:error('not_found')).
--spec(update_scratch/3 :: (name(), atom(), fun((any()) -> any())) -> 'ok').
--spec(update/2 ::
+                               rabbit_types:error('not_found').
+-spec update_scratch(name(), atom(), fun((any()) -> any())) -> 'ok'.
+-spec update
         (name(),
          fun((rabbit_types:exchange()) -> rabbit_types:exchange()))
-         -> not_found | rabbit_types:exchange()).
--spec(update_decorators/1 :: (name()) -> 'ok').
--spec(immutable/1 :: (rabbit_types:exchange()) -> rabbit_types:exchange()).
--spec(info_keys/0 :: () -> rabbit_types:info_keys()).
--spec(info/1 :: (rabbit_types:exchange()) -> rabbit_types:infos()).
--spec(info/2 ::
+         -> not_found | rabbit_types:exchange().
+-spec update_decorators(name()) -> 'ok'.
+-spec immutable(rabbit_types:exchange()) -> rabbit_types:exchange().
+-spec info_keys() -> rabbit_types:info_keys().
+-spec info(rabbit_types:exchange()) -> rabbit_types:infos().
+-spec info
         (rabbit_types:exchange(), rabbit_types:info_keys())
-        -> rabbit_types:infos()).
--spec(info_all/1 :: (rabbit_types:vhost()) -> [rabbit_types:infos()]).
--spec(info_all/2 ::(rabbit_types:vhost(), rabbit_types:info_keys())
-                   -> [rabbit_types:infos()]).
--spec(route/2 :: (rabbit_types:exchange(), rabbit_types:delivery())
-                 -> [rabbit_amqqueue:name()]).
--spec(delete/2 ::
+        -> rabbit_types:infos().
+-spec info_all(rabbit_types:vhost()) -> [rabbit_types:infos()].
+-spec info_all(rabbit_types:vhost(), rabbit_types:info_keys())
+                   -> [rabbit_types:infos()].
+-spec info_all(rabbit_types:vhost(), rabbit_types:info_keys(),
+                    reference(), pid())
+                   -> 'ok'.
+-spec route(rabbit_types:exchange(), rabbit_types:delivery())
+                 -> [rabbit_amqqueue:name()].
+-spec delete
         (name(),  'true') -> 'ok' | rabbit_types:error('not_found' | 'in_use');
-        (name(), 'false') -> 'ok' | rabbit_types:error('not_found')).
--spec(validate_binding/2 ::
+        (name(), 'false') -> 'ok' | rabbit_types:error('not_found').
+-spec validate_binding
         (rabbit_types:exchange(), rabbit_types:binding())
-        -> rabbit_types:ok_or_error({'binding_invalid', string(), [any()]})).
--spec(maybe_auto_delete/2::
+        -> rabbit_types:ok_or_error({'binding_invalid', string(), [any()]}).
+-spec maybe_auto_delete
         (rabbit_types:exchange(), boolean())
-        -> 'not_deleted' | {'deleted', rabbit_binding:deletions()}).
--spec(serial/1 :: (rabbit_types:exchange()) ->
-                       fun((boolean()) -> 'none' | pos_integer())).
--spec(peek_serial/1 :: (name()) -> pos_integer() | 'undefined').
-
--endif.
+        -> 'not_deleted' | {'deleted', rabbit_binding:deletions()}.
+-spec serial(rabbit_types:exchange()) ->
+                       fun((boolean()) -> 'none' | pos_integer()).
+-spec peek_serial(name()) -> pos_integer() | 'undefined'.
 
 %%----------------------------------------------------------------------------
 
@@ -163,24 +162,37 @@ declare(XName, Type, Durable, AutoDelete, Internal, Args) ->
     XT = type_to_module(Type),
     %% We want to upset things if it isn't ok
     ok = XT:validate(X),
-    rabbit_misc:execute_mnesia_transaction(
-      fun () ->
-              case mnesia:wread({rabbit_exchange, XName}) of
-                  [] ->
-                      {new, store(X)};
-                  [ExistingX] ->
-                      {existing, ExistingX}
-              end
-      end,
-      fun ({new, Exchange}, Tx) ->
-              ok = callback(X, create, map_create_tx(Tx), [Exchange]),
-              rabbit_event:notify_if(not Tx, exchange_created, info(Exchange)),
-              Exchange;
-          ({existing, Exchange}, _Tx) ->
-              Exchange;
-          (Err, _Tx) ->
-              Err
-      end).
+    %% Avoid a channel exception if there's a race condition
+    %% with an exchange.delete operation.
+    %%
+    %% See rabbitmq/rabbitmq-federation#7.
+    case rabbit_runtime_parameters:lookup(XName#resource.virtual_host,
+                                          ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
+                                          XName#resource.name) of
+        not_found ->
+            rabbit_misc:execute_mnesia_transaction(
+              fun () ->
+                      case mnesia:wread({rabbit_exchange, XName}) of
+                          [] ->
+                              {new, store(X)};
+                          [ExistingX] ->
+                              {existing, ExistingX}
+                      end
+              end,
+              fun ({new, Exchange}, Tx) ->
+                      ok = callback(X, create, map_create_tx(Tx), [Exchange]),
+                      rabbit_event:notify_if(not Tx, exchange_created, info(Exchange)),
+                      Exchange;
+                  ({existing, Exchange}, _Tx) ->
+                      Exchange;
+                  (Err, _Tx) ->
+                      Err
+              end);
+        _ ->
+            rabbit_log:warning("ignoring exchange.declare for exchange ~p,
+                                exchange.delete in progress~n.", [XName]),
+            X
+    end.
 
 map_create_tx(true)  -> transaction;
 map_create_tx(false) -> none.
@@ -330,15 +342,25 @@ i(policy,      X) ->  case rabbit_policy:name(X) of
                           none   -> '';
                           Policy -> Policy
                       end;
-i(Item, _) -> throw({bad_argument, Item}).
+i(Item, #exchange{type = Type} = X) ->
+    case (type_to_module(Type)):info(X, [Item]) of
+        [{Item, I}] -> I;
+        []          -> throw({bad_argument, Item})
+    end.
 
-info(X = #exchange{}) -> infos(?INFO_KEYS, X).
+info(X = #exchange{type = Type}) ->
+    infos(?INFO_KEYS, X) ++ (type_to_module(Type)):info(X).
 
-info(X = #exchange{}, Items) -> infos(Items, X).
+info(X = #exchange{type = _Type}, Items) ->
+    infos(Items, X).
 
 info_all(VHostPath) -> map(VHostPath, fun (X) -> info(X) end).
 
 info_all(VHostPath, Items) -> map(VHostPath, fun (X) -> info(X, Items) end).
+
+info_all(VHostPath, Items, Ref, AggregatorPid) ->
+    rabbit_control_misc:emitting_map(
+      AggregatorPid, Ref, fun(X) -> info(X, Items) end, list(VHostPath)).
 
 route(#exchange{name = #resource{virtual_host = VHost, name = RName} = XName,
                 decorators = Decorators} = X,
@@ -420,18 +442,31 @@ delete(XName, IfUnused) ->
               true  -> fun conditional_delete/2;
               false -> fun unconditional_delete/2
           end,
-    call_with_exchange(
-      XName,
-      fun (X) ->
-              case Fun(X, false) of
-                  {deleted, X, Bs, Deletions} ->
-                      rabbit_binding:process_deletions(
-                        rabbit_binding:add_deletion(
-                          XName, {X, deleted, Bs}, Deletions));
-                  {error, _InUseOrNotFound} = E ->
-                      rabbit_misc:const(E)
-              end
-      end).
+    try
+        %% guard exchange.declare operations from failing when there's
+        %% a race condition between it and an exchange.delete.
+        %%
+        %% see rabbitmq/rabbitmq-federation#7
+        rabbit_runtime_parameters:set(XName#resource.virtual_host,
+                                      ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
+                                      XName#resource.name, true, none),
+        call_with_exchange(
+          XName,
+          fun (X) ->
+                  case Fun(X, false) of
+                      {deleted, X, Bs, Deletions} ->
+                          rabbit_binding:process_deletions(
+                            rabbit_binding:add_deletion(
+                              XName, {X, deleted, Bs}, Deletions));
+                      {error, _InUseOrNotFound} = E ->
+                          rabbit_misc:const(E)
+                  end
+          end)
+    after
+        rabbit_runtime_parameters:clear(XName#resource.virtual_host,
+                                        ?EXCHANGE_DELETE_IN_PROGRESS_COMPONENT,
+                                        XName#resource.name)
+    end.
 
 validate_binding(X = #exchange{type = XType}, Binding) ->
     Module = type_to_module(XType),

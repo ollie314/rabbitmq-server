@@ -36,16 +36,13 @@
                  depth_fun
                }).
 
--ifdef(use_specs).
-
--spec(start_link/4 :: (rabbit_types:amqqueue(), pid() | 'undefined',
-                       rabbit_mirror_queue_master:death_fun(),
-                       rabbit_mirror_queue_master:depth_fun()) ->
-                           rabbit_types:ok_pid_or_error()).
--spec(get_gm/1 :: (pid()) -> pid()).
--spec(ensure_monitoring/2 :: (pid(), [pid()]) -> 'ok').
-
--endif.
+-spec start_link
+        (rabbit_types:amqqueue(), pid() | 'undefined',
+         rabbit_mirror_queue_master:death_fun(),
+         rabbit_mirror_queue_master:depth_fun()) ->
+            rabbit_types:ok_pid_or_error().
+-spec get_gm(pid()) -> pid().
+-spec ensure_monitoring(pid(), [pid()]) -> 'ok'.
 
 %%----------------------------------------------------------------------------
 %%
@@ -358,17 +355,34 @@ handle_cast({gm_deaths, DeadGMPids},
                                                    DeadPids),
             rabbit_mirror_queue_misc:add_mirrors(QueueName, ExtraNodes, async),
             noreply(State);
+        {ok, _MPid0, DeadPids, _ExtraNodes} ->
+            %% see rabbitmq-server#914;
+            %% Different slave is now master, stop current coordinator normally.
+            %% Initiating queue is now slave and the least we could do is report
+            %% deaths which we 'think' we saw.
+            %% NOTE: Reported deaths here, could be inconsistant.
+            rabbit_mirror_queue_misc:report_deaths(MPid, false, QueueName,
+                                                   DeadPids),
+            {stop, shutdown, State};
         {error, not_found} ->
             {stop, normal, State}
     end;
 
-handle_cast(request_depth, State = #state { depth_fun = DepthFun }) ->
-    ok = DepthFun(),
-    noreply(State);
+handle_cast(request_depth, State = #state { depth_fun = DepthFun,
+					    q  = #amqqueue { name = QName, pid = MPid }}) ->
+    case rabbit_amqqueue:lookup(QName) of
+	{ok, #amqqueue{ pid = MPid }} ->
+	    ok = DepthFun(),
+	    noreply(State);
+	_ ->
+	    {stop, shutdown, State}
+    end;
 
 handle_cast({ensure_monitoring, Pids}, State = #state { monitors = Mons }) ->
     noreply(State #state { monitors = pmon:monitor_all(Pids, Mons) });
 
+handle_cast({delete_and_terminate, {shutdown, ring_shutdown}}, State) ->
+    {stop, normal, State};
 handle_cast({delete_and_terminate, Reason}, State) ->
     {stop, Reason, State}.
 
@@ -416,13 +430,22 @@ handle_msg([CPid], _From, request_depth = Msg) ->
     ok = gen_server2:cast(CPid, Msg);
 handle_msg([CPid], _From, {ensure_monitoring, _Pids} = Msg) ->
     ok = gen_server2:cast(CPid, Msg);
-handle_msg([CPid], _From, {delete_and_terminate, _Reason} = Msg) ->
-    ok = gen_server2:cast(CPid, Msg),
+handle_msg([_CPid], _From, {delete_and_terminate, _Reason}) ->
+    %% We tell GM to stop, but we don't instruct the coordinator to
+    %% stop yet. The GM will first make sure all pending messages were
+    %% actually delivered. Then it calls handle_terminate/2 below so the
+    %% coordinator is stopped.
+    %%
+    %% If we stop the coordinator right now, remote slaves could see the
+    %% coordinator DOWN before delete_and_terminate was delivered to all
+    %% GMs. One of those GM would be promoted as the master, and this GM
+    %% would hang forever, waiting for other GMs to stop.
     {stop, {shutdown, ring_shutdown}};
 handle_msg([_CPid], _From, _Msg) ->
     ok.
 
-handle_terminate([_CPid], _Reason) ->
+handle_terminate([CPid], Reason) ->
+    ok = gen_server2:cast(CPid, {delete_and_terminate, Reason}),
     ok.
 
 %% ---------------------------------------------------------------------------

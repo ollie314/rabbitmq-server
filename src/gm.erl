@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(gm).
@@ -391,10 +391,6 @@
 %% For INSTR_MOD callbacks
 -export([call/3, cast/2, monitor/1, demonitor/1]).
 
--ifndef(use_specs).
--export([behaviour_info/1]).
--endif.
-
 -export([table_definitions/0]).
 
 -define(GROUP_TABLE, gm_group).
@@ -436,22 +432,20 @@
 
 -define(TAG, '$gm').
 
--ifdef(use_specs).
-
 -export_type([group_name/0]).
 
--type(group_name() :: any()).
--type(txn_fun() :: fun((fun(() -> any())) -> any())).
+-type group_name() :: any().
+-type txn_fun() :: fun((fun(() -> any())) -> any()).
 
--spec(create_tables/0 :: () -> 'ok' | {'aborted', any()}).
--spec(start_link/4 :: (group_name(), atom(), any(), txn_fun()) ->
-                           rabbit_types:ok_pid_or_error()).
--spec(leave/1 :: (pid()) -> 'ok').
--spec(broadcast/2 :: (pid(), any()) -> 'ok').
--spec(confirmed_broadcast/2 :: (pid(), any()) -> 'ok').
--spec(info/1 :: (pid()) -> rabbit_types:infos()).
--spec(validate_members/2 :: (pid(), [pid()]) -> 'ok').
--spec(forget_group/1 :: (group_name()) -> 'ok').
+-spec create_tables() -> 'ok' | {'aborted', any()}.
+-spec start_link(group_name(), atom(), any(), txn_fun()) ->
+          rabbit_types:ok_pid_or_error().
+-spec leave(pid()) -> 'ok'.
+-spec broadcast(pid(), any()) -> 'ok'.
+-spec confirmed_broadcast(pid(), any()) -> 'ok'.
+-spec info(pid()) -> rabbit_types:infos().
+-spec validate_members(pid(), [pid()]) -> 'ok'.
+-spec forget_group(group_name()) -> 'ok'.
 
 %% The joined, members_changed and handle_msg callbacks can all return
 %% any of the following terms:
@@ -496,15 +490,6 @@
 %% the Args provided in start_link plus the termination Reason.
 -callback handle_terminate(Args :: term(), Reason :: term()) ->
     ok | term().
-
--else.
-
-behaviour_info(callbacks) ->
-    [{joined, 2}, {members_changed, 3}, {handle_msg, 3}, {handle_terminate, 2}];
-behaviour_info(_Other) ->
-    undefined.
-
--endif.
 
 create_tables() ->
     create_tables([?TABLE]).
@@ -551,9 +536,6 @@ forget_group(GroupName) ->
 
 init([GroupName, Module, Args, TxnFun]) ->
     put(process_name, {?MODULE, GroupName}),
-    random:seed(erlang:phash2([node()]),
-                time_compat:monotonic_time(),
-                time_compat:unique_integer()),
     Self = make_member(GroupName),
     gen_server2:cast(self(), join),
     {ok, #state { self                = Self,
@@ -617,14 +599,20 @@ handle_call({add_on_right, NewMember}, _From,
                              group_name    = GroupName,
                              members_state = MembersState,
                              txn_executor  = TxnFun }) ->
-    Group = record_new_member_in_group(NewMember, Self, GroupName, TxnFun),
-    View1 = group_to_view(Group),
-    MembersState1 = remove_erased_members(MembersState, View1),
-    ok = send_right(NewMember, View1,
-                    {catchup, Self, prepare_members_state(MembersState1)}),
-    {Result, State1} = change_view(View1, State #state {
-                                            members_state = MembersState1 }),
-    handle_callback_result({Result, {ok, Group}, State1}).
+    try
+        Group = record_new_member_in_group(
+                  NewMember, Self, GroupName, TxnFun),
+        View1 = group_to_view(check_membership(Self, Group)),
+        MembersState1 = remove_erased_members(MembersState, View1),
+        ok = send_right(NewMember, View1,
+                        {catchup, Self, prepare_members_state(MembersState1)}),
+        {Result, State1} = change_view(View1, State #state {
+                                                members_state = MembersState1 }),
+        handle_callback_result({Result, {ok, Group}, State1})
+    catch
+        lost_membership ->
+            {stop, shutdown, State}
+    end.
 
 %% add_on_right causes a catchup to be sent immediately from the left,
 %% so we can never see this from the left neighbour. However, it's
@@ -638,19 +626,28 @@ handle_cast({?TAG, _ReqVer, check_neighbours},
 
 handle_cast({?TAG, ReqVer, Msg},
             State = #state { view          = View,
+                             self          = Self,
                              members_state = MembersState,
                              group_name    = GroupName }) ->
-    {Result, State1} =
-        case needs_view_update(ReqVer, View) of
-            true  -> View1 = group_to_view(dirty_read_group(GroupName)),
-                     MemberState1 = remove_erased_members(MembersState, View1),
-                     change_view(View1, State #state {
-                                          members_state = MemberState1 });
-            false -> {ok, State}
-        end,
-    handle_callback_result(
-      if_callback_success(
-        Result, fun handle_msg_true/3, fun handle_msg_false/3, Msg, State1));
+    try
+        {Result, State1} =
+            case needs_view_update(ReqVer, View) of
+                true  ->
+                    View1 = group_to_view(
+                              check_membership(Self,
+                                               dirty_read_group(GroupName))),
+                    MemberState1 = remove_erased_members(MembersState, View1),
+                    change_view(View1, State #state {
+                                         members_state = MemberState1 });
+                false -> {ok, State}
+            end,
+        handle_callback_result(
+          if_callback_success(
+            Result, fun handle_msg_true/3, fun handle_msg_false/3, Msg, State1))
+    catch
+        lost_membership ->
+            {stop, shutdown, State}
+    end;
 
 handle_cast({broadcast, _Msg, _SizeHint},
             State = #state { shutting_down = {true, _} }) ->
@@ -678,16 +675,21 @@ handle_cast(join, State = #state { self          = Self,
                                    module        = Module,
                                    callback_args = Args,
                                    txn_executor  = TxnFun }) ->
-    View = join_group(Self, GroupName, TxnFun),
-    MembersState =
-        case alive_view_members(View) of
-            [Self] -> blank_member_state();
-            _      -> undefined
-        end,
-    State1 = check_neighbours(State #state { view          = View,
-                                             members_state = MembersState }),
-    handle_callback_result(
-      {Module:joined(Args, get_pids(all_known_members(View))), State1});
+    try
+	View = join_group(Self, GroupName, TxnFun),
+	MembersState =
+	    case alive_view_members(View) of
+		[Self] -> blank_member_state();
+		_      -> undefined
+	    end,
+	State1 = check_neighbours(State #state { view          = View,
+						 members_state = MembersState }),
+	handle_callback_result(
+	  {Module:joined(Args, get_pids(all_known_members(View))), State1})
+    catch
+        lost_membership ->
+            {stop, shutdown, State}
+    end;
 
 handle_cast({validate_members, OldMembers},
             State = #state { view          = View,
@@ -713,6 +715,10 @@ handle_info(flush, State) ->
 handle_info(timeout, State) ->
     noreply(flush_broadcast_buffer(State));
 
+handle_info({'DOWN', _MRef, process, _Pid, _Reason},
+            State = #state { shutting_down =
+                                 {true, {shutdown, ring_shutdown}} }) ->
+    noreply(State);
 handle_info({'DOWN', MRef, process, _Pid, Reason},
             State = #state { self          = Self,
                              left          = Left,
@@ -720,42 +726,52 @@ handle_info({'DOWN', MRef, process, _Pid, Reason},
                              group_name    = GroupName,
                              confirms      = Confirms,
                              txn_executor  = TxnFun }) ->
-    Member = case {Left, Right} of
-                 {{Member1, MRef}, _} -> Member1;
-                 {_, {Member1, MRef}} -> Member1;
-                 _                    -> undefined
-             end,
-    case {Member, Reason} of
-        {undefined, _} ->
-            noreply(State);
-        {_, {shutdown, ring_shutdown}} ->
-            noreply(State);
-        _ ->
-            %% In the event of a partial partition we could see another member
-            %% go down and then remove them from Mnesia. While they can
-            %% recover from this they'd have to restart the queue - not
-            %% ideal. So let's sleep here briefly just in case this was caused
-            %% by a partial partition; in which case by the time we record the
-            %% member death in Mnesia we will probably be in a full
-            %% partition and will not be assassinating another member.
-            timer:sleep(100),
-            View1 = group_to_view(record_dead_member_in_group(
-                                    Member, GroupName, TxnFun)),
-            handle_callback_result(
-              case alive_view_members(View1) of
-                  [Self] -> maybe_erase_aliases(
-                              State #state {
-                                members_state = blank_member_state(),
-                                confirms      = purge_confirms(Confirms) },
-                              View1);
-                  _      -> change_view(View1, State)
-              end)
-    end.
-
+    try
+        check_membership(GroupName),
+        Member = case {Left, Right} of
+                     {{Member1, MRef}, _} -> Member1;
+                     {_, {Member1, MRef}} -> Member1;
+                     _                    -> undefined
+                 end,
+        case {Member, Reason} of
+            {undefined, _} ->
+                noreply(State);
+            {_, {shutdown, ring_shutdown}} ->
+                noreply(State);
+            _ ->
+                %% In the event of a partial partition we could see another member
+                %% go down and then remove them from Mnesia. While they can
+                %% recover from this they'd have to restart the queue - not
+                %% ideal. So let's sleep here briefly just in case this was caused
+                %% by a partial partition; in which case by the time we record the
+                %% member death in Mnesia we will probably be in a full
+                %% partition and will not be assassinating another member.
+                timer:sleep(100),
+                View1 = group_to_view(record_dead_member_in_group(Self,
+                                        Member, GroupName, TxnFun, true)),
+                handle_callback_result(
+                  case alive_view_members(View1) of
+                      [Self] -> maybe_erase_aliases(
+                                  State #state {
+                                    members_state = blank_member_state(),
+                                    confirms      = purge_confirms(Confirms) },
+                                  View1);
+                      _      -> change_view(View1, State)
+                  end)
+        end
+    catch
+        lost_membership ->
+            {stop, shutdown, State}
+    end;
+handle_info(_, State) ->
+    %% Discard any unexpected messages, such as late replies from neighbour_call/2
+    %% TODO: For #gm_group{} related info messages, it could be worthwhile to
+    %% change_view/2, as this might reflect an alteration in the gm group, meaning
+    %% we now need to update our state. see rabbitmq-server#914.
+    noreply(State).
 
 terminate(Reason, #state { module = Module, callback_args = Args }) ->
     Module:handle_terminate(Args, Reason).
-
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -837,52 +853,30 @@ handle_msg({catchup, _NotLeft, _MembersState}, State) ->
 
 handle_msg({activity, Left, Activity},
            State = #state { self          = Self,
+                            group_name    = GroupName,
                             left          = {Left, _MRefL},
                             view          = View,
                             members_state = MembersState,
                             confirms      = Confirms })
   when MembersState =/= undefined ->
-    {MembersState1, {Confirms1, Activity1}} =
-        lists:foldl(
-          fun ({Id, Pubs, Acks}, MembersStateConfirmsActivity) ->
-                  with_member_acc(
-                    fun (Member = #member { pending_ack = PA,
-                                            last_pub    = LP,
-                                            last_ack    = LA },
-                         {Confirms2, Activity2}) ->
-                            case is_member_alias(Id, Self, View) of
-                                true ->
-                                    {ToAck, PA1} =
-                                        find_common(queue_from_pubs(Pubs), PA,
-                                                    queue:new()),
-                                    LA1 = last_ack(Acks, LA),
-                                    AckNums = acks_from_queue(ToAck),
-                                    Confirms3 = maybe_confirm(
-                                                  Self, Id, Confirms2, AckNums),
-                                    {Member #member { pending_ack = PA1,
-                                                      last_ack    = LA1 },
-                                     {Confirms3,
-                                      activity_cons(
-                                        Id, [], AckNums, Activity2)}};
-                                false ->
-                                    PA1 = apply_acks(Acks, join_pubs(PA, Pubs)),
-                                    LA1 = last_ack(Acks, LA),
-                                    LP1 = last_pub(Pubs, LP),
-                                    {Member #member { pending_ack = PA1,
-                                                      last_pub    = LP1,
-                                                      last_ack    = LA1 },
-                                     {Confirms2,
-                                      activity_cons(Id, Pubs, Acks, Activity2)}}
-                            end
-                    end, Id, MembersStateConfirmsActivity)
-          end, {MembersState, {Confirms, activity_nil()}}, Activity),
-    State1 = State #state { members_state = MembersState1,
-                            confirms      = Confirms1 },
-    Activity3 = activity_finalise(Activity1),
-    ok = maybe_send_activity(Activity3, State1),
-    {Result, State2} = maybe_erase_aliases(State1, View),
-    if_callback_success(
-      Result, fun activity_true/3, fun activity_false/3, Activity3, State2);
+    try
+        %% If we have to stop, do it asap so we avoid any ack confirmation
+        %% Membership must be checked again by erase_members_in_group, as the
+        %% node can be marked as dead on the meanwhile
+        check_membership(GroupName),
+        {MembersState1, {Confirms1, Activity1}} =
+            calculate_activity(MembersState, Confirms, Activity, Self, View),
+        State1 = State #state { members_state = MembersState1,
+                                confirms      = Confirms1 },
+        Activity3 = activity_finalise(Activity1),
+        ok = maybe_send_activity(Activity3, State1),
+        {Result, State2} = maybe_erase_aliases(State1, View),
+        if_callback_success(
+          Result, fun activity_true/3, fun activity_false/3, Activity3, State2)
+    catch
+        lost_membership ->
+            {{stop, shutdown}, State}
+    end;
 
 handle_msg({activity, _NotLeft, _Activity}, State) ->
     {ok, State}.
@@ -902,7 +896,7 @@ ensure_broadcast_timer(State = #state { broadcast_buffer = [],
     State;
 ensure_broadcast_timer(State = #state { broadcast_buffer = [],
                                         broadcast_timer  = TRef }) ->
-    erlang:cancel_timer(TRef),
+    _ = erlang:cancel_timer(TRef),
     State #state { broadcast_timer = undefined };
 ensure_broadcast_timer(State = #state { broadcast_timer = undefined }) ->
     TRef = erlang:send_after(?BROADCAST_TIMER, self(), flush),
@@ -1082,13 +1076,13 @@ join_group(Self, GroupName, #gm_group { members = Members } = Group, TxnFun) ->
                                prune_or_create_group(Self, GroupName, TxnFun),
                                TxnFun);
                 Alive ->
-                    Left = lists:nth(random:uniform(length(Alive)), Alive),
+                    Left = lists:nth(rand:uniform(length(Alive)), Alive),
                     Handler =
                         fun () ->
                                 join_group(
                                   Self, GroupName,
-                                  record_dead_member_in_group(
-                                    Left, GroupName, TxnFun),
+                                  record_dead_member_in_group(Self,
+                                    Left, GroupName, TxnFun, false),
                                   TxnFun)
                         end,
                     try
@@ -1138,47 +1132,84 @@ prune_or_create_group(Self, GroupName, TxnFun) ->
               end
       end).
 
-record_dead_member_in_group(Member, GroupName, TxnFun) ->
-    TxnFun(
-      fun () ->
-              Group = #gm_group { members = Members, version = Ver } =
-                  read_group(GroupName),
-              case lists:splitwith(
-                     fun (Member1) -> Member1 =/= Member end, Members) of
-                  {_Members1, []} -> %% not found - already recorded dead
-                      Group;
-                  {Members1, [Member | Members2]} ->
-                      Members3 = Members1 ++ [{dead, Member} | Members2],
-                      write_group(Group #gm_group { members = Members3,
-                                                    version = Ver + 1 })
-              end
-      end).
+record_dead_member_in_group(Self, Member, GroupName, TxnFun, Verify) ->
+    Fun =
+        fun () ->
+                try
+                    Group = #gm_group { members = Members, version = Ver } =
+                        case Verify of
+                            true ->
+                                check_membership(Self, read_group(GroupName));
+                            false ->
+                                check_group(read_group(GroupName))
+                        end,
+                    case lists:splitwith(
+                           fun (Member1) -> Member1 =/= Member end, Members) of
+                        {_Members1, []} -> %% not found - already recorded dead
+                            Group;
+                        {Members1, [Member | Members2]} ->
+                            Members3 = Members1 ++ [{dead, Member} | Members2],
+                            write_group(Group #gm_group { members = Members3,
+                                                          version = Ver + 1 })
+                    end
+                catch
+                    lost_membership ->
+                        %% The transaction must not be abruptly crashed, but
+                        %% leave the gen_server to stop normally
+                        {error, lost_membership}
+                end
+        end,
+    handle_lost_membership_in_txn(TxnFun, Fun).
+
+handle_lost_membership_in_txn(TxnFun, Fun) ->
+    case TxnFun(Fun)  of
+        {error, lost_membership = T} ->
+            throw(T);
+        Any ->
+            Any
+    end.
 
 record_new_member_in_group(NewMember, Left, GroupName, TxnFun) ->
-    TxnFun(
-      fun () ->
-              Group = #gm_group { members = Members, version = Ver } =
-                  read_group(GroupName),
-              {Prefix, [Left | Suffix]} =
-                  lists:splitwith(fun (M) -> M =/= Left end, Members),
-              write_group(Group #gm_group {
-                            members = Prefix ++ [Left, NewMember | Suffix],
-                            version = Ver + 1 })
-      end).
+    Fun =
+        fun () ->
+                try
+                    Group = #gm_group { members = Members, version = Ver } =
+                        check_membership(Left, read_group(GroupName)),
+                    {Prefix, [Left | Suffix]} =
+                        lists:splitwith(fun (M) -> M =/= Left end, Members),
+                    write_group(Group #gm_group {
+                                  members = Prefix ++ [Left, NewMember | Suffix],
+                                  version = Ver + 1 })
+                catch
+                    lost_membership ->
+                        %% The transaction must not be abruptly crashed, but
+                        %% leave the gen_server to stop normally
+                        {error, lost_membership}
+                end
+        end,
+    handle_lost_membership_in_txn(TxnFun, Fun).
 
-erase_members_in_group(Members, GroupName, TxnFun) ->
+erase_members_in_group(Self, Members, GroupName, TxnFun) ->
     DeadMembers = [{dead, Id} || Id <- Members],
-    TxnFun(
-      fun () ->
-              Group = #gm_group { members = [_|_] = Members1, version = Ver } =
-                  read_group(GroupName),
-              case Members1 -- DeadMembers of
-                  Members1 -> Group;
-                  Members2 -> write_group(
-                                Group #gm_group { members = Members2,
-                                                  version = Ver + 1 })
+    Fun =
+        fun () ->
+                try
+                    Group = #gm_group { members = [_|_] = Members1, version = Ver } =
+                        check_membership(Self, read_group(GroupName)),
+                    case Members1 -- DeadMembers of
+                        Members1 -> Group;
+                        Members2 -> write_group(
+                                      Group #gm_group { members = Members2,
+                                                        version = Ver + 1 })
+                    end
+              catch
+                  lost_membership ->
+                      %% The transaction must not be abruptly crashed, but
+                      %% leave the gen_server to stop normally
+                      {error, lost_membership}
               end
-      end).
+        end,
+    handle_lost_membership_in_txn(TxnFun, Fun).
 
 maybe_erase_aliases(State = #state { self          = Self,
                                      group_name    = GroupName,
@@ -1199,7 +1230,7 @@ maybe_erase_aliases(State = #state { self          = Self,
     View1 = case Erasable of
                 [] -> View;
                 _  -> group_to_view(
-                        erase_members_in_group(Erasable, GroupName, TxnFun))
+                        erase_members_in_group(Self, Erasable, GroupName, TxnFun))
             end,
     change_view(View1, State #state { members_state = MembersState1 }).
 
@@ -1299,7 +1330,11 @@ find_common(A, B, Common) ->
         {{{value, Val}, A1}, {{value, Val}, B1}} ->
             find_common(A1, B1, queue:in(Val, Common));
         {{empty, _A}, _} ->
-            {Common, B}
+            {Common, B};
+        {_, {_, B1}} ->
+            find_common(A, B1, Common);
+        {{_, A1}, _} ->
+            find_common(A1, B, Common)
     end.
 
 
@@ -1373,6 +1408,41 @@ maybe_send_activity(Activity, #state { self  = Self,
 
 send_right(Right, View, Msg) ->
     ok = neighbour_cast(Right, {?TAG, view_version(View), Msg}).
+
+calculate_activity(MembersState, Confirms, Activity, Self, View) ->
+    lists:foldl(
+      fun ({Id, Pubs, Acks}, MembersStateConfirmsActivity) ->
+              with_member_acc(
+                fun (Member = #member { pending_ack = PA,
+                                        last_pub    = LP,
+                                        last_ack    = LA },
+                     {Confirms2, Activity2}) ->
+                        case is_member_alias(Id, Self, View) of
+                            true ->
+                                {ToAck, PA1} =
+                                    find_common(queue_from_pubs(Pubs), PA,
+                                                queue:new()),
+                                LA1 = last_ack(Acks, LA),
+                                AckNums = acks_from_queue(ToAck),
+                                Confirms3 = maybe_confirm(
+                                              Self, Id, Confirms2, AckNums),
+                                {Member #member { pending_ack = PA1,
+                                                  last_ack    = LA1 },
+                                 {Confirms3,
+                                  activity_cons(
+                                    Id, [], AckNums, Activity2)}};
+                            false ->
+                                PA1 = apply_acks(Acks, join_pubs(PA, Pubs)),
+                                LA1 = last_ack(Acks, LA),
+                                LP1 = last_pub(Pubs, LP),
+                                {Member #member { pending_ack = PA1,
+                                                  last_pub    = LP1,
+                                                  last_ack    = LA1 },
+                                 {Confirms2,
+                                  activity_cons(Id, Pubs, Acks, Activity2)}}
+                        end
+                end, Id, MembersStateConfirmsActivity)
+      end, {MembersState, {Confirms, activity_nil()}}, Activity).
 
 callback(Args, Module, Activity) ->
     Result =
@@ -1487,7 +1557,7 @@ maybe_confirm(_Self, _Id, Confirms, _PubNums) ->
     Confirms.
 
 purge_confirms(Confirms) ->
-    [gen_server2:reply(From, ok) || {_PubNum, From} <- queue:to_list(Confirms)],
+    _ = [gen_server2:reply(From, ok) || {_PubNum, From} <- queue:to_list(Confirms)],
     queue:new().
 
 
@@ -1526,3 +1596,31 @@ call(Pid, Msg, Timeout) -> gen_server2:call(Pid, Msg, Timeout).
 cast(Pid, Msg)          -> gen_server2:cast(Pid, Msg).
 monitor(Pid)            -> erlang:monitor(process, Pid).
 demonitor(MRef)         -> erlang:demonitor(MRef).
+
+check_membership(Self, #gm_group{members = M} = Group) ->
+    case lists:member(Self, M) of
+        true ->
+            Group;
+        false ->
+            throw(lost_membership)
+    end;
+check_membership(_Self, {error, not_found}) ->
+    throw(lost_membership).
+
+check_membership(GroupName) ->
+    case dirty_read_group(GroupName) of
+        #gm_group{members = M} ->
+            case lists:keymember(self(), 2, M) of
+                true ->
+                    ok;
+                false ->
+                    throw(lost_membership)
+            end;
+        {error, not_found} ->
+            throw(lost_membership)
+    end.
+
+check_group({error, not_found}) ->
+    throw(lost_membership);
+check_group(Any) ->
+    Any.

@@ -1,0 +1,38 @@
+sudo: false
+services:
+  - docker
+language: erlang
+notifications:
+  email:
+    - alerts@rabbitmq.com
+addons:
+  apt:
+    packages:
+      - xsltproc
+otp_release:
+  - "18.3"
+  - "19.0"
+env:
+  matrix:
+  - GROUP=1
+  - GROUP=2
+
+# The checkout made by Travis is a "detached HEAD" and branches
+# information is missing. Our Erlang.mk's git_rmq fetch method relies on
+# it, so we need to restore it.
+#
+# We simply fetch master and, if it exists, stable branches. A branch is
+# created, pointing to the detached HEAD.
+before_script:
+  - |
+    git checkout -B "${TRAVIS_TAG:-${TRAVIS_BRANCH}}"
+    git remote add upstream https://github.com/$TRAVIS_REPO_SLUG.git
+    git fetch upstream stable:stable || :
+    git fetch upstream master:master || :
+
+script:
+  - if test "${GROUP}" = '1'; then make tests; fi
+  - if test "${GROUP}" = '2'; then sh ./scripts/travis_test_ocf_ra.sh; fi
+
+cache:
+  apt: true

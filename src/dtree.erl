@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% A dual-index tree.
@@ -37,29 +37,25 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([?MODULE/0]).
 
--opaque(?MODULE()  :: {gb_trees:tree(), gb_trees:tree()}).
+-opaque ?MODULE()  :: {gb_trees:tree(), gb_trees:tree()}.
 
--type(pk()         :: any()).
--type(sk()         :: any()).
--type(val()        :: any()).
--type(kv()         :: {pk(), val()}).
+-type pk()         :: any().
+-type sk()         :: any().
+-type val()        :: any().
+-type kv()         :: {pk(), val()}.
 
--spec(empty/0      :: () -> ?MODULE()).
--spec(insert/4     :: (pk(), [sk()], val(), ?MODULE()) -> ?MODULE()).
--spec(take/3       :: ([pk()], sk(), ?MODULE()) -> {[kv()], ?MODULE()}).
--spec(take/2       :: (sk(), ?MODULE()) -> {[kv()], ?MODULE()}).
--spec(take_all/2   :: (sk(), ?MODULE()) -> {[kv()], ?MODULE()}).
--spec(drop/2       :: (pk(), ?MODULE()) -> ?MODULE()).
--spec(is_defined/2 :: (sk(), ?MODULE()) -> boolean()).
--spec(is_empty/1   :: (?MODULE()) -> boolean()).
--spec(smallest/1   :: (?MODULE()) -> kv()).
--spec(size/1       :: (?MODULE()) -> non_neg_integer()).
-
--endif.
+-spec empty() -> ?MODULE().
+-spec insert(pk(), [sk()], val(), ?MODULE()) -> ?MODULE().
+-spec take([pk()], sk(), ?MODULE()) -> {[kv()], ?MODULE()}.
+-spec take(sk(), ?MODULE()) -> {[kv()], ?MODULE()}.
+-spec take_all(sk(), ?MODULE()) -> {[kv()], ?MODULE()}.
+-spec drop(pk(), ?MODULE()) -> ?MODULE().
+-spec is_defined(sk(), ?MODULE()) -> boolean().
+-spec is_empty(?MODULE()) -> boolean().
+-spec smallest(?MODULE()) -> kv().
+-spec size(?MODULE()) -> non_neg_integer().
 
 %%----------------------------------------------------------------------------
 
@@ -69,7 +65,7 @@ empty() -> {gb_trees:empty(), gb_trees:empty()}.
 %% primary key.
 insert(PK, [], V, {P, S}) ->
     %% dummy insert to force error if PK exists
-    gb_trees:insert(PK, {gb_sets:empty(), V}, P),
+    _ = gb_trees:insert(PK, {gb_sets:empty(), V}, P),
     {P, S};
 insert(PK, SKs, V, {P, S}) ->
     {gb_trees:insert(PK, {gb_sets:from_list(SKs), V}, P),

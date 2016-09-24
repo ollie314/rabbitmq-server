@@ -11,10 +11,15 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_channel_sup_sup).
+
+%% Supervisor for AMQP 0-9-1 channels. Every AMQP 0-9-1 connection has
+%% one of these.
+%%
+%% See also rabbit_channel_sup, rabbit_connection_helper_sup, rabbit_reader.
 
 -behaviour(supervisor2).
 
@@ -24,13 +29,9 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
--spec(start_channel/2 :: (pid(), rabbit_channel_sup:start_link_args()) ->
-                              {'ok', pid(), {pid(), any()}}).
-
--endif.
+-spec start_link() -> rabbit_types:ok_pid_or_error().
+-spec start_channel(pid(), rabbit_channel_sup:start_link_args()) ->
+          {'ok', pid(), {pid(), any()}}.
 
 %%----------------------------------------------------------------------------
 

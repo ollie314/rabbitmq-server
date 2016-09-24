@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(file_handle_cache_stats).
@@ -26,7 +26,7 @@
         [io_reopen, mnesia_ram_tx, mnesia_disk_tx,
          msg_store_read, msg_store_write,
          queue_index_journal_write, queue_index_write, queue_index_read]).
--define(COUNT_TIME, [io_sync, io_seek]).
+-define(COUNT_TIME, [io_sync, io_seek, io_file_handle_open_attempt]).
 -define(COUNT_TIME_BYTES, [io_read, io_write]).
 
 init() ->
@@ -58,11 +58,9 @@ update(Op) ->
 get() ->
     lists:sort(ets:tab2list(?TABLE)).
 
-%% TODO timer:tc/1 was introduced in R14B03; use that function once we
-%% require that version.
 timer_tc(Thunk) ->
-    T1 = time_compat:monotonic_time(),
+    T1 = erlang:monotonic_time(),
     Res = Thunk(),
-    T2 = time_compat:monotonic_time(),
-    Diff = time_compat:convert_time_unit(T2 - T1, native, micro_seconds),
+    T2 = erlang:monotonic_time(),
+    Diff = erlang:convert_time_unit(T2 - T1, native, micro_seconds),
     {Diff, Res}.

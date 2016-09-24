@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(background_gc).
@@ -32,13 +32,9 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/0 :: () -> {'ok', pid()} | {'error', any()}).
--spec(run/0 :: () -> 'ok').
--spec(gc/0 :: () -> 'ok').
-
--endif.
+-spec start_link() -> {'ok', pid()} | {'error', any()}.
+-spec run() -> 'ok'.
+-spec gc() -> 'ok'.
 
 %%----------------------------------------------------------------------------
 

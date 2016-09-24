@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_node_monitor).
@@ -45,35 +45,31 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
+-spec start_link() -> rabbit_types:ok_pid_or_error().
 
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
+-spec running_nodes_filename() -> string().
+-spec cluster_status_filename() -> string().
+-spec prepare_cluster_status_files() -> 'ok'.
+-spec write_cluster_status(rabbit_mnesia:cluster_status()) -> 'ok'.
+-spec read_cluster_status() -> rabbit_mnesia:cluster_status().
+-spec update_cluster_status() -> 'ok'.
+-spec reset_cluster_status() -> 'ok'.
 
--spec(running_nodes_filename/0 :: () -> string()).
--spec(cluster_status_filename/0 :: () -> string()).
--spec(prepare_cluster_status_files/0 :: () -> 'ok').
--spec(write_cluster_status/1 :: (rabbit_mnesia:cluster_status()) -> 'ok').
--spec(read_cluster_status/0 :: () -> rabbit_mnesia:cluster_status()).
--spec(update_cluster_status/0 :: () -> 'ok').
--spec(reset_cluster_status/0 :: () -> 'ok').
+-spec notify_node_up() -> 'ok'.
+-spec notify_joined_cluster() -> 'ok'.
+-spec notify_left_cluster(node()) -> 'ok'.
 
--spec(notify_node_up/0 :: () -> 'ok').
--spec(notify_joined_cluster/0 :: () -> 'ok').
--spec(notify_left_cluster/1 :: (node()) -> 'ok').
+-spec partitions() -> [node()].
+-spec partitions([node()]) -> [{node(), [node()]}].
+-spec status([node()]) -> {[{node(), [node()]}], [node()]}.
+-spec subscribe(pid()) -> 'ok'.
+-spec pause_partition_guard() -> 'ok' | 'pausing'.
 
--spec(partitions/0 :: () -> [node()]).
--spec(partitions/1 :: ([node()]) -> [{node(), [node()]}]).
--spec(status/1 :: ([node()]) -> {[{node(), [node()]}], [node()]}).
--spec(subscribe/1 :: (pid()) -> 'ok').
--spec(pause_partition_guard/0 :: () -> 'ok' | 'pausing').
-
--spec(all_rabbit_nodes_up/0 :: () -> boolean()).
--spec(run_outside_applications/2 :: (fun (() -> any()), boolean()) -> pid()).
--spec(ping_all/0 :: () -> 'ok').
--spec(alive_nodes/1 :: ([node()]) -> [node()]).
--spec(alive_rabbit_nodes/1 :: ([node()]) -> [node()]).
-
--endif.
+-spec all_rabbit_nodes_up() -> boolean().
+-spec run_outside_applications(fun (() -> any()), boolean()) -> pid().
+-spec ping_all() -> 'ok'.
+-spec alive_nodes([node()]) -> [node()].
+-spec alive_rabbit_nodes([node()]) -> [node()].
 
 %%----------------------------------------------------------------------------
 %% Start
@@ -340,7 +336,17 @@ init([]) ->
     process_flag(trap_exit, true),
     net_kernel:monitor_nodes(true, [nodedown_reason]),
     {ok, _} = mnesia:subscribe(system),
-    {ok, ensure_keepalive_timer(#state{monitors    = pmon:new(),
+    %% If the node has been restarted, Mnesia can trigger a system notification
+    %% before the monitor subscribes to receive them. To avoid autoheal blocking due to
+    %% the inconsistent database event never arriving, we being monitoring all running
+    %% nodes as early as possible. The rest of the monitoring ops will only be triggered
+    %% when notifications arrive.
+    Nodes = possibly_partitioned_nodes(),
+    startup_log(Nodes),
+    Monitors = lists:foldl(fun(Node, Monitors0) ->
+				   pmon:monitor({rabbit, Node}, Monitors0)
+			   end, pmon:new(), Nodes),
+    {ok, ensure_keepalive_timer(#state{monitors    = Monitors,
                                        subscribers = pmon:new(),
                                        partitions  = [],
                                        guid        = rabbit_guid:gen(),
@@ -414,7 +420,12 @@ handle_cast({check_partial_partition, Node, Rep, NodeGUID, MyGUID, RepGUID},
                    fun () ->
                            case rpc:call(Node, rabbit, is_running, []) of
                                {badrpc, _} -> ok;
-                               _           -> cast(Rep, {partial_partition,
+                               _           ->  
+				   rabbit_log:warning("Received a 'DOWN' message" 
+						      " from ~p but still can" 
+						      " communicate with it ~n",
+						      [Node]),
+				   cast(Rep, {partial_partition,
                                                          Node, node(), RepGUID})
                            end
                    end);
@@ -485,20 +496,22 @@ handle_cast({partial_partition_disconnect, Other}, State) ->
 %% mnesia propagation.
 handle_cast({node_up, Node, NodeType},
             State = #state{monitors = Monitors}) ->
-    case pmon:is_monitored({rabbit, Node}, Monitors) of
-        true  -> {noreply, State};
-        false -> rabbit_log:info("rabbit on node ~p up~n", [Node]),
-                 {AllNodes, DiscNodes, RunningNodes} = read_cluster_status(),
-                 write_cluster_status({add_node(Node, AllNodes),
-                                       case NodeType of
-                                           disc -> add_node(Node, DiscNodes);
-                                           ram  -> DiscNodes
-                                       end,
-                                       add_node(Node, RunningNodes)}),
-                 ok = handle_live_rabbit(Node),
-                 Monitors1 = pmon:monitor({rabbit, Node}, Monitors),
-                 {noreply, maybe_autoheal(State#state{monitors = Monitors1})}
-    end;
+    rabbit_log:info("rabbit on node ~p up~n", [Node]),
+    {AllNodes, DiscNodes, RunningNodes} = read_cluster_status(),
+    write_cluster_status({add_node(Node, AllNodes),
+			  case NodeType of
+			      disc -> add_node(Node, DiscNodes);
+			      ram  -> DiscNodes
+			  end,
+			  add_node(Node, RunningNodes)}),
+    ok = handle_live_rabbit(Node),
+    Monitors1 = case pmon:is_monitored({rabbit, Node}, Monitors) of
+		    true ->
+			Monitors;
+		    false ->
+			pmon:monitor({rabbit, Node}, Monitors)
+		end,
+    {noreply, maybe_autoheal(State#state{monitors = Monitors1})};
 
 handle_cast({joined_cluster, Node, NodeType}, State) ->
     {AllNodes, DiscNodes, RunningNodes} = read_cluster_status(),
@@ -571,7 +584,7 @@ handle_info({mnesia_system_event,
     State1 = case pmon:is_monitored({rabbit, Node}, Monitors) of
                  true  -> State;
                  false -> State#state{
-                            monitors = pmon:monitor({rabbit, Node}, Monitors)}
+			    monitors = pmon:monitor({rabbit, Node}, Monitors)}
              end,
     ok = handle_live_rabbit(Node),
     Partitions1 = lists:usort([Node | Partitions]),
@@ -872,3 +885,12 @@ alive_rabbit_nodes(Nodes) ->
 ping_all() ->
     [net_adm:ping(N) || N <- rabbit_mnesia:cluster_nodes(all)],
     ok.
+
+possibly_partitioned_nodes() ->
+    alive_rabbit_nodes() -- rabbit_mnesia:cluster_nodes(running).
+
+startup_log([]) ->
+    rabbit_log:info("Starting rabbit_node_monitor~n", []);
+startup_log(Nodes) ->
+    rabbit_log:info("Starting rabbit_node_monitor, might be partitioned from ~p~n",
+		    [Nodes]).

@@ -40,12 +40,10 @@
          ackfold/4, fold/3, len/1, is_empty/1, depth/1,
          set_ram_duration_target/2, ram_duration/1, needs_timeout/1, timeout/1,
          handle_pre_hibernate/1, resume/1, msg_rates/1,
-         info/2, invoke/3, is_duplicate/2]).
+         info/2, invoke/3, is_duplicate/2, set_queue_mode/2,
+         zip_msgs_and_acks/4]).
 
-%% for rabbit_mirror_queue_sync.
--export([partition_publish_delivered_batch/1]).
-
--record(state, {bq, bqss}).
+-record(state, {bq, bqss, max_priority}).
 -record(passthrough, {bq, bqs}).
 
 %% See 'note on suffixes' below
@@ -128,7 +126,7 @@ collapse_recovery(QNames, DupNames, Recovery) ->
     [dict:fetch(Name, NameToTerms) || Name <- QNames].
 
 priorities(#amqqueue{arguments = Args}) ->
-    Ints = [long, short, signedint, byte],
+    Ints = [long, short, signedint, byte, unsignedbyte, unsignedshort, unsignedint],
     case rabbit_misc:table_lookup(Args, <<"x-max-priority">>) of
         {Type, Max} -> case lists:member(Type, Ints) of
                            false -> none;
@@ -159,7 +157,8 @@ init(Q, Recover, AsyncCallback) ->
                                     [{P, Init(P, Term)} || {P, Term} <- PsTerms]
                        end,
                 #state{bq   = BQ,
-                       bqss = BQSs}
+                       bqss = BQSs,
+                       max_priority = hd(Ps)}
     end.
 %% [0] collapse_recovery has the effect of making a list of recovery
 %% terms in priority order, even for non priority queues. It's easier
@@ -207,8 +206,8 @@ publish(Msg, MsgProps, IsDelivered, ChPid, Flow,
         State = #passthrough{bq = BQ, bqs = BQS}) ->
     ?passthrough1(publish(Msg, MsgProps, IsDelivered, ChPid, Flow, BQS)).
 
-batch_publish(Publishes, ChPid, Flow, State = #state{bq = BQ}) ->
-    PubDict = partition_publish_batch(Publishes),
+batch_publish(Publishes, ChPid, Flow, State = #state{bq = BQ, bqss = [{MaxP, _} |_]}) ->
+    PubDict = partition_publish_batch(Publishes, MaxP),
     lists:foldl(
       fun ({Priority, Pubs}, St) ->
               pick1(fun (_P, BQSN) ->
@@ -229,8 +228,8 @@ publish_delivered(Msg, MsgProps, ChPid, Flow,
                   State = #passthrough{bq = BQ, bqs = BQS}) ->
     ?passthrough2(publish_delivered(Msg, MsgProps, ChPid, Flow, BQS)).
 
-batch_publish_delivered(Publishes, ChPid, Flow, State = #state{bq = BQ}) ->
-    PubDict = partition_publish_delivered_batch(Publishes),
+batch_publish_delivered(Publishes, ChPid, Flow, State = #state{bq = BQ, bqss = [{MaxP, _} |_]}) ->
+    PubDict = partition_publish_delivered_batch(Publishes, MaxP),
     {PrioritiesAndAcks, State1} =
         lists:foldl(
           fun ({Priority, Pubs}, {PriosAndAcks, St}) ->
@@ -406,7 +405,6 @@ msg_rates(#state{bq = BQ, bqss = BQSs}) ->
           end, {0.0, 0.0}, BQSs);
 msg_rates(#passthrough{bq = BQ, bqs = BQS}) ->
     BQ:msg_rates(BQS).
-
 info(backing_queue_status, #state{bq = BQ, bqss = BQSs}) ->
     fold0(fun (P, BQSN, Acc) ->
                   combine_status(P, BQ:info(backing_queue_status, BQSN), Acc)
@@ -422,6 +420,8 @@ info(Item, #passthrough{bq = BQ, bqs = BQS}) ->
 
 invoke(Mod, {P, Fun}, State = #state{bq = BQ}) ->
     pick1(fun (_P, BQSN) -> BQ:invoke(Mod, Fun, BQSN) end, P, State);
+invoke(Mod, Fun, State = #state{bq = BQ, max_priority = P}) ->
+    pick1(fun (_P, BQSN) -> BQ:invoke(Mod, Fun, BQSN) end, P, State);
 invoke(Mod, Fun, State = #passthrough{bq = BQ, bqs = BQS}) ->
     ?passthrough1(invoke(Mod, Fun, BQS)).
 
@@ -429,6 +429,23 @@ is_duplicate(Msg, State = #state{bq = BQ}) ->
     pick2(fun (_P, BQSN) -> BQ:is_duplicate(Msg, BQSN) end, Msg, State);
 is_duplicate(Msg, State = #passthrough{bq = BQ, bqs = BQS}) ->
     ?passthrough2(is_duplicate(Msg, BQS)).
+
+set_queue_mode(Mode, State = #state{bq = BQ}) ->
+    foreach1(fun (_P, BQSN) -> BQ:set_queue_mode(Mode, BQSN) end, State);
+set_queue_mode(Mode, State = #passthrough{bq = BQ, bqs = BQS}) ->
+    ?passthrough1(set_queue_mode(Mode, BQS)).
+
+zip_msgs_and_acks(Msgs, AckTags, Accumulator, #state{bqss = [{MaxP, _} |_]}) ->
+    MsgsByPriority = partition_publish_delivered_batch(Msgs, MaxP),
+    lists:foldl(fun (Acks, MAs) ->
+                        {P, _AckTag} = hd(Acks),
+                        Pubs = orddict:fetch(P, MsgsByPriority),
+                        MAs0 = zip_msgs_and_acks(Pubs, Acks),
+                        MAs ++ MAs0
+                end, Accumulator, AckTags);
+zip_msgs_and_acks(Msgs, AckTags, Accumulator,
+                  #passthrough{bq = BQ, bqs = BQS}) ->
+    BQ:zip_msgs_and_acks(Msgs, AckTags, Accumulator, BQS).
 
 %%----------------------------------------------------------------------------
 
@@ -469,13 +486,14 @@ foreach1(_Fun, [], BQSAcc) ->
 
 %% For a given thing, just go to its BQ
 pick1(Fun, Prioritisable, #state{bqss = BQSs} = State) ->
-    {P, BQSN} = priority(Prioritisable, BQSs),
+    {P, BQSN} = priority_bq(Prioritisable, BQSs),
     a(State#state{bqss = bq_store(P, Fun(P, BQSN), BQSs)}).
 
 %% Fold over results
 fold2(Fun, Acc, State = #state{bqss = BQSs}) ->
     {Res, BQSs1} = fold2(Fun, Acc, BQSs, []),
     {Res, a(State#state{bqss = BQSs1})}.
+
 fold2(Fun, Acc, [{P, BQSN} | Rest], BQSAcc) ->
     {Acc1, BQSN1} = Fun(P, BQSN, Acc),
     fold2(Fun, Acc1, Rest, [{P, BQSN1} | BQSAcc]);
@@ -517,7 +535,7 @@ fold_by_acktags2(Fun, AckTags, State) ->
 
 %% For a given thing, just go to its BQ
 pick2(Fun, Prioritisable, #state{bqss = BQSs} = State) ->
-    {P, BQSN} = priority(Prioritisable, BQSs),
+    {P, BQSN} = priority_bq(Prioritisable, BQSs),
     {Res, BQSN1} = Fun(P, BQSN),
     {Res, a(State#state{bqss = bq_store(P, BQSN1, BQSs)})}.
 
@@ -548,8 +566,8 @@ findfold3(Fun, Acc, NotFound, [{P, BQSN} | Rest], BQSAcc) ->
 findfold3(_Fun, Acc, NotFound, [], BQSAcc) ->
     {NotFound, Acc, lists:reverse(BQSAcc)}.
 
-bq_fetch(P, [])               -> exit({not_found, P});
-bq_fetch(P, [{P,  BQSN} | _]) -> BQSN;
+bq_fetch(P, []) -> exit({not_found, P});
+bq_fetch(P, [{P,  BQSN} | _]) -> {P, BQSN};
 bq_fetch(P, [{_, _BQSN} | T]) -> bq_fetch(P, T).
 
 bq_store(P, BQS, BQSs) ->
@@ -567,41 +585,41 @@ a(State = #state{bqss = BQSs}) ->
     end.
 
 %%----------------------------------------------------------------------------
-partition_publish_batch(Publishes) ->
+partition_publish_batch(Publishes, MaxP) ->
     partition_publishes(
-      Publishes, fun ({Msg, _, _}) -> Msg end).
+      Publishes, fun ({Msg, _, _}) -> Msg end, MaxP).
 
-partition_publish_delivered_batch(Publishes) ->
+partition_publish_delivered_batch(Publishes, MaxP) ->
     partition_publishes(
-      Publishes, fun ({Msg, _}) -> Msg end).
+      Publishes, fun ({Msg, _}) -> Msg end, MaxP).
 
-partition_publishes(Publishes, ExtractMsg) ->
-    lists:foldl(fun (Pub, Dict) ->
-                        Msg = ExtractMsg(Pub),
-                        rabbit_misc:orddict_cons(priority2(Msg), Pub, Dict)
-                end, orddict:new(), Publishes).
+partition_publishes(Publishes, ExtractMsg, MaxP) ->
+    Partitioned =
+        lists:foldl(fun (Pub, Dict) ->
+                            Msg = ExtractMsg(Pub),
+                            rabbit_misc:orddict_cons(priority(Msg, MaxP), Pub, Dict)
+                    end, orddict:new(), Publishes),
+    orddict:map(fun (_P, RevPubs) ->
+                        lists:reverse(RevPubs)
+                end, Partitioned).
 
-priority(P, BQSs) when is_integer(P) ->
-    {P, bq_fetch(P, BQSs)};
-priority(#basic_message{content = Content}, BQSs) ->
-    priority1(rabbit_binary_parser:ensure_content_decoded(Content), BQSs).
 
-priority1(_Content, [{P, BQSN}]) ->
-    {P, BQSN};
-priority1(Content, [{P, BQSN} | Rest]) ->
-    case priority2(Content) >= P of
-        true  -> {P, BQSN};
-        false -> priority1(Content, Rest)
-    end.
+priority_bq(Priority, [{MaxP, _} | _] = BQSs) ->
+    bq_fetch(priority(Priority, MaxP), BQSs).
 
-priority2(#basic_message{content = Content}) ->
-    priority2(rabbit_binary_parser:ensure_content_decoded(Content));
-priority2(#content{properties = Props}) ->
+%% Messages with a priority which is higher than the queue's maximum are treated
+%% as if they were published with the maximum priority.
+priority(undefined, _MaxP) ->
+    0;
+priority(Priority, MaxP) when is_integer(Priority), Priority =< MaxP ->
+    Priority;
+priority(Priority, MaxP) when is_integer(Priority), Priority > MaxP ->
+    MaxP;
+priority(#basic_message{content = Content}, MaxP) ->
+    priority(rabbit_binary_parser:ensure_content_decoded(Content), MaxP);
+priority(#content{properties = Props}, MaxP) ->
     #'P_basic'{priority = Priority0} = Props,
-    case Priority0 of
-        undefined                    -> 0;
-        _ when is_integer(Priority0) -> Priority0
-    end.
+    priority(Priority0, MaxP).
 
 add_maybe_infinity(infinity, _) -> infinity;
 add_maybe_infinity(_, infinity) -> infinity;
@@ -632,6 +650,12 @@ combine_status(P, New, Old) ->
 
 cse(infinity, _)            -> infinity;
 cse(_, infinity)            -> infinity;
+%% queue modes
+cse(_, default)             -> default;
+cse(default, _)             -> default;
+cse(_, lazy)                -> lazy;
+cse(lazy, _)                -> lazy;
+%% numerical stats
 cse(A, B) when is_number(A) -> A + B;
 cse({delta, _, _, _}, _)    -> {delta, todo, todo, todo};
 cse(A, B)                   -> exit({A, B}).
@@ -649,3 +673,9 @@ find_head_message_timestamp(BQ, [{_, BQSN} | Rest], Timestamp) ->
     end;
 find_head_message_timestamp(_, [], Timestamp) ->
     Timestamp.
+
+zip_msgs_and_acks(Pubs, AckTags) ->
+    lists:zipwith(
+      fun ({#basic_message{ id = Id }, _Props}, AckTag) ->
+                  {Id, AckTag}
+      end, Pubs, AckTags).

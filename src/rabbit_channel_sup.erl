@@ -11,10 +11,20 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_channel_sup).
+
+%% Supervises processes that implement AMQP 0-9-1 channels:
+%%
+%%  * Channel process itself
+%%  * Network writer (for network connections)
+%%  * Limiter (handles channel QoS and flow control)
+%%
+%% Every rabbit_channel_sup is supervised by rabbit_channel_sup_sup.
+%%
+%% See also rabbit_channel, rabbit_writer, rabbit_limiter.
 
 -behaviour(supervisor2).
 
@@ -26,22 +36,20 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([start_link_args/0]).
 
--type(start_link_args() ::
+-type start_link_args() ::
         {'tcp', rabbit_net:socket(), rabbit_channel:channel_number(),
          non_neg_integer(), pid(), string(), rabbit_types:protocol(),
          rabbit_types:user(), rabbit_types:vhost(), rabbit_framing:amqp_table(),
          pid()} |
         {'direct', rabbit_channel:channel_number(), pid(), string(),
          rabbit_types:protocol(), rabbit_types:user(), rabbit_types:vhost(),
-         rabbit_framing:amqp_table(), pid()}).
+         rabbit_framing:amqp_table(), pid()}.
 
--spec(start_link/1 :: (start_link_args()) -> {'ok', pid(), {pid(), any()}}).
+-spec start_link(start_link_args()) -> {'ok', pid(), {pid(), any()}}.
 
--endif.
+-define(FAIR_WAIT, 70000).
 
 %%----------------------------------------------------------------------------
 
@@ -59,7 +67,7 @@ start_link({tcp, Sock, Channel, FrameMax, ReaderPid, ConnName, Protocol, User,
                      [Channel, ReaderPid, WriterPid, ReaderPid, ConnName,
                       Protocol, User, VHost, Capabilities, Collector,
                       LimiterPid]},
-           intrinsic, ?MAX_WAIT, worker, [rabbit_channel]}),
+           intrinsic, ?FAIR_WAIT, worker, [rabbit_channel]}),
     {ok, AState} = rabbit_command_assembler:init(Protocol),
     {ok, SupPid, {ChannelPid, AState}};
 start_link({direct, Channel, ClientChannelPid, ConnPid, ConnName, Protocol,
@@ -74,7 +82,7 @@ start_link({direct, Channel, ClientChannelPid, ConnPid, ConnName, Protocol,
                      [Channel, ClientChannelPid, ClientChannelPid, ConnPid,
                       ConnName, Protocol, User, VHost, Capabilities, Collector,
                       LimiterPid]},
-           intrinsic, ?MAX_WAIT, worker, [rabbit_channel]}),
+           intrinsic, ?FAIR_WAIT, worker, [rabbit_channel]}),
     {ok, SupPid, {ChannelPid, none}}.
 
 %%----------------------------------------------------------------------------
@@ -85,8 +93,8 @@ init(Type) ->
 child_specs({tcp, Sock, Channel, FrameMax, ReaderPid, Protocol, Identity}) ->
     [{writer, {rabbit_writer, start_link,
                [Sock, Channel, FrameMax, Protocol, ReaderPid, Identity, true]},
-      intrinsic, ?MAX_WAIT, worker, [rabbit_writer]}
+      intrinsic, ?FAIR_WAIT, worker, [rabbit_writer]}
      | child_specs({direct, Identity})];
 child_specs({direct, Identity}) ->
     [{limiter, {rabbit_limiter, start_link, [Identity]},
-      transient, ?MAX_WAIT, worker, [rabbit_limiter]}].
+      transient, ?FAIR_WAIT, worker, [rabbit_limiter]}].

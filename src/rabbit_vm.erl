@@ -11,24 +11,23 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_vm).
 
--export([memory/0, binary/0]).
+-export([memory/0, binary/0, ets_tables_memory/1]).
 
 -define(MAGIC_PLUGINS, ["mochiweb", "webmachine", "cowboy", "sockjs",
                         "rfc4627_jsonrpc"]).
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(memory/0 :: () -> rabbit_types:infos()).
--spec(binary/0 :: () -> rabbit_types:infos()).
-
--endif.
+-spec memory() -> rabbit_types:infos().
+-spec binary() -> rabbit_types:infos().
+-spec ets_tables_memory(Owners) -> rabbit_types:infos()
+     when Owners :: all | OwnerProcessName | [OwnerProcessName],
+          OwnerProcessName :: atom().
 
 %%----------------------------------------------------------------------------
 
@@ -45,7 +44,7 @@ memory() ->
 
     Mnesia       = mnesia_memory(),
     MsgIndexETS  = ets_memory([msg_store_persistent, msg_store_transient]),
-    MgmtDbETS    = ets_memory([rabbit_mgmt_db]),
+    MgmtDbETS    = ets_memory([rabbit_mgmt_event_collector]),
 
     [{total,     Total},
      {processes, Processes},
@@ -118,12 +117,25 @@ mnesia_memory() ->
     end.
 
 ets_memory(OwnerNames) ->
-    Owners = [whereis(N) || N <- OwnerNames],
-    lists:sum([bytes(ets:info(T, memory)) || T <- ets:all(),
-                                             O <- [ets:info(T, owner)],
-                                             lists:member(O, Owners)]).
+    lists:sum([V || {_K, V} <- ets_tables_memory(OwnerNames)]).
 
-bytes(Words) ->  Words * erlang:system_info(wordsize).
+ets_tables_memory(all) ->
+    [{ets:info(T, name), bytes(ets:info(T, memory))}
+     || T <- ets:all(),
+        is_atom(T)];
+ets_tables_memory(OwnerName) when is_atom(OwnerName) ->
+    ets_tables_memory([OwnerName]);
+ets_tables_memory(OwnerNames) when is_list(OwnerNames) ->
+    Owners = [whereis(N) || N <- OwnerNames],
+    [{ets:info(T, name), bytes(ets:info(T, memory))}
+     || T <- ets:all(),
+        lists:member(ets:info(T, owner), Owners)].
+
+bytes(Words) ->  try
+                     Words * erlang:system_info(wordsize)
+                 catch
+                     _:_ -> 0
+                 end.
 
 interesting_sups() ->
     [[rabbit_amqqueue_sup_sup], conn_sups() | interesting_sups0()].
@@ -134,7 +146,18 @@ interesting_sups0() ->
     PluginProcs   = plugin_sups(),
     [MsgIndexProcs, MgmtDbProcs, PluginProcs].
 
-conn_sups()     -> [rabbit_tcp_client_sup, ssl_connection_sup, amqp_sup].
+conn_sups()     ->
+    Ranches = lists:flatten(ranch_server_sups()),
+    [amqp_sup|Ranches].
+
+ranch_server_sups() ->
+    try
+        ets:match(ranch_server, {{conns_sup, '_'}, '$1'})
+    catch
+        %% Ranch ETS table doesn't exist yet
+        error:badarg  -> []
+    end.
+
 conn_sups(With) -> [{Sup, With} || Sup <- conn_sups()].
 
 distinguishers() -> [{rabbit_amqqueue_sup_sup, fun queue_type/1} |
@@ -203,21 +226,19 @@ conn_type(PDict) ->
 
 %% NB: this code is non-rabbit specific.
 
--ifdef(use_specs).
--type(process() :: pid() | atom()).
--type(info_key() :: atom()).
--type(info_value() :: any()).
--type(info_item() :: {info_key(), info_value()}).
--type(accumulate() :: fun ((info_key(), info_value(), info_value()) ->
-                                  info_value())).
--type(distinguisher() :: fun (([{term(), term()}]) -> atom())).
--type(distinguishers() :: [{info_key(), distinguisher()}]).
--spec(sum_processes/3 :: ([process()], distinguishers(), [info_key()]) ->
-                              {[{process(), [info_item()]}], [info_item()]}).
--spec(sum_processes/4 :: ([process()], accumulate(), distinguishers(),
+-type process() :: pid() | atom().
+-type info_key() :: atom().
+-type info_value() :: any().
+-type info_item() :: {info_key(), info_value()}.
+-type accumulate() :: fun ((info_key(), info_value(), info_value()) ->
+                                  info_value()).
+-type distinguisher() :: fun (([{term(), term()}]) -> atom()).
+-type distinguishers() :: [{info_key(), distinguisher()}].
+-spec sum_processes([process()], distinguishers(), [info_key()]) ->
+                              {[{process(), [info_item()]}], [info_item()]}.
+-spec sum_processes([process()], accumulate(), distinguishers(),
                           [info_item()]) ->
-                              {[{process(), [info_item()]}], [info_item()]}).
--endif.
+                              {[{process(), [info_item()]}], [info_item()]}.
 
 sum_processes(Names, Distinguishers, Items) ->
     sum_processes(Names, fun (_, X, Y) -> X + Y end, Distinguishers,

@@ -11,37 +11,44 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_version).
 
 -export([recorded/0, matches/2, desired/0, desired_for_scope/1,
          record_desired/0, record_desired_for_scope/1,
-         upgrades_required/1]).
+         upgrades_required/1, check_version_consistency/3,
+         check_version_consistency/4, check_otp_consistency/1,
+         version_error/3]).
 
 %% -------------------------------------------------------------------
--ifdef(use_specs).
 
 -export_type([scope/0, step/0]).
 
--type(scope() :: atom()).
--type(scope_version() :: [atom()]).
--type(step() :: {atom(), atom()}).
+-type scope() :: atom().
+-type scope_version() :: [atom()].
+-type step() :: {atom(), atom()}.
 
--type(version() :: [atom()]).
+-type version() :: [atom()].
 
--spec(recorded/0 :: () -> rabbit_types:ok_or_error2(version(), any())).
--spec(matches/2 :: ([A], [A]) -> boolean()).
--spec(desired/0 :: () -> version()).
--spec(desired_for_scope/1 :: (scope()) -> scope_version()).
--spec(record_desired/0 :: () -> 'ok').
--spec(record_desired_for_scope/1 ::
-        (scope()) -> rabbit_types:ok_or_error(any())).
--spec(upgrades_required/1 ::
-        (scope()) -> rabbit_types:ok_or_error2([step()], any())).
+-spec recorded() -> rabbit_types:ok_or_error2(version(), any()).
+-spec matches([A], [A]) -> boolean().
+-spec desired() -> version().
+-spec desired_for_scope(scope()) -> scope_version().
+-spec record_desired() -> 'ok'.
+-spec record_desired_for_scope
+        (scope()) -> rabbit_types:ok_or_error(any()).
+-spec upgrades_required
+        (scope()) -> rabbit_types:ok_or_error2([step()], any()).
+-spec check_version_consistency
+        (string(), string(), string()) -> rabbit_types:ok_or_error(any()).
+-spec check_version_consistency
+        (string(), string(), string(), string()) ->
+                                          rabbit_types:ok_or_error(any()).
+-spec check_otp_consistency
+        (string()) -> rabbit_types:ok_or_error(any()).
 
--endif.
 %% -------------------------------------------------------------------
 
 -define(VERSION_FILENAME, "schema_version").
@@ -173,3 +180,22 @@ categorise_by_scope(Version) when is_list(Version) ->
 dir() -> rabbit_mnesia:dir().
 
 schema_filename() -> filename:join(dir(), ?VERSION_FILENAME).
+
+%% --------------------------------------------------------------------
+
+check_version_consistency(This, Remote, Name) ->
+    check_version_consistency(This, Remote, Name, fun (A, B) -> A =:= B end).
+
+check_version_consistency(This, Remote, Name, Comp) ->
+    case Comp(This, Remote) of
+        true  -> ok;
+        false -> version_error(Name, This, Remote)
+    end.
+
+version_error(Name, This, Remote) ->
+    {error, {inconsistent_cluster,
+             rabbit_misc:format("~s version mismatch: local node is ~s, "
+                                "remote node ~s", [Name, This, Remote])}}.
+
+check_otp_consistency(Remote) ->
+    check_version_consistency(rabbit_misc:otp_release(), Remote, "OTP").

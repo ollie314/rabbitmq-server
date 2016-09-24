@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_error_logger).
@@ -27,16 +27,11 @@
 -export([init/1, terminate/2, code_change/3, handle_call/2, handle_event/2,
          handle_info/2]).
 
--import(rabbit_error_logger_file_h, [safe_handle_event/3]).
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start/0 :: () -> 'ok').
--spec(stop/0  :: () -> 'ok').
-
--endif.
+-spec start() -> 'ok'.
+-spec stop() -> 'ok'.
 
 %%----------------------------------------------------------------------------
 
@@ -54,7 +49,7 @@ start() ->
 
 stop() ->
     case error_logger:delete_report_handler(rabbit_error_logger) of
-        terminated_ok             -> ok;
+        ok                        -> ok;
         {error, module_not_found} -> ok
     end.
 
@@ -69,7 +64,7 @@ init([DefaultVHost]) ->
                    name = ?LOG_EXCH_NAME}}.
 
 terminate(_Arg, _State) ->
-    terminated_ok.
+    ok.
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
@@ -101,12 +96,28 @@ publish(_Other, _Format, _Data, _State) ->
 publish1(RoutingKey, Format, Data, LogExch) ->
     %% 0-9-1 says the timestamp is a "64 bit POSIX timestamp". That's
     %% second resolution, not millisecond.
-    Timestamp = time_compat:os_system_time(seconds),
+    Timestamp = os:system_time(seconds),
 
     Args = [truncate:term(A, ?LOG_TRUNC) || A <- Data],
-    {ok, _DeliveredQPids} =
-        rabbit_basic:publish(LogExch, RoutingKey,
-                             #'P_basic'{content_type = <<"text/plain">>,
-                                        timestamp    = Timestamp},
-                             list_to_binary(io_lib:format(Format, Args))),
-    ok.
+    Headers = [{<<"node">>, longstr, list_to_binary(atom_to_list(node()))}],
+    case rabbit_basic:publish(LogExch, RoutingKey,
+                              #'P_basic'{content_type = <<"text/plain">>,
+                                         timestamp    = Timestamp,
+                                         headers      = Headers},
+                              list_to_binary(io_lib:format(Format, Args))) of
+        {ok, _DeliveredQPids} -> ok;
+        {error, not_found}    -> ok
+    end.
+
+
+safe_handle_event(HandleEvent, Event, State) ->
+    try
+        HandleEvent(Event, State)
+    catch
+        _:Error ->
+            io:format(
+              "Error in log handler~n====================~n"
+              "Event: ~P~nError: ~P~nStack trace: ~p~n~n",
+              [Event, 30, Error, 30, erlang:get_stacktrace()]),
+            {ok, State}
+    end.

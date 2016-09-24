@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% We use a gen_server simply so that during the terminate/2 call
@@ -34,15 +34,11 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start() -> rabbit_types:ok_or_error(term())).
--spec(stop() -> rabbit_types:ok_or_error(term())).
--spec(store(file:filename(), term()) -> rabbit_types:ok_or_error(term())).
--spec(read(file:filename()) -> rabbit_types:ok_or_error2(term(), not_found)).
--spec(clear() -> 'ok').
-
--endif. % use_specs
+-spec start() -> rabbit_types:ok_or_error(term()).
+-spec stop() -> rabbit_types:ok_or_error(term()).
+-spec store(file:filename(), term()) -> rabbit_types:ok_or_error(term()).
+-spec read(file:filename()) -> rabbit_types:ok_or_error2(term(), not_found).
+-spec clear() -> 'ok'.
 
 %%----------------------------------------------------------------------------
 

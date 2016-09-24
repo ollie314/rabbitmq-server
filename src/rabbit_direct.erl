@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_direct).
@@ -25,27 +25,25 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(boot/0 :: () -> 'ok').
--spec(force_event_refresh/1 :: (reference()) -> 'ok').
--spec(list/0 :: () -> [pid()]).
--spec(list_local/0 :: () -> [pid()]).
--spec(connect/5 :: (({'none', 'none'} | {rabbit_types:username(), 'none'} |
-                     {rabbit_types:username(), rabbit_types:password()}),
-                    rabbit_types:vhost(), rabbit_types:protocol(), pid(),
-                    rabbit_event:event_props()) ->
-                        rabbit_types:ok_or_error2(
-                          {rabbit_types:user(), rabbit_framing:amqp_table()},
-                          'broker_not_found_on_node' |
-                          {'auth_failure', string()} | 'access_refused')).
--spec(start_channel/9 ::
+-spec boot() -> 'ok'.
+-spec force_event_refresh(reference()) -> 'ok'.
+-spec list() -> [pid()].
+-spec list_local() -> [pid()].
+-spec connect
+        (({'none', 'none'} | {rabbit_types:username(), 'none'} |
+          {rabbit_types:username(), rabbit_types:password()}),
+         rabbit_types:vhost(), rabbit_types:protocol(), pid(),
+         rabbit_event:event_props()) ->
+            rabbit_types:ok_or_error2(
+              {rabbit_types:user(), rabbit_framing:amqp_table()},
+              'broker_not_found_on_node' |
+              {'auth_failure', string()} | 'access_refused').
+-spec start_channel
         (rabbit_channel:channel_number(), pid(), pid(), string(),
          rabbit_types:protocol(), rabbit_types:user(), rabbit_types:vhost(),
-         rabbit_framing:amqp_table(), pid()) -> {'ok', pid()}).
--spec(disconnect/2 :: (pid(), rabbit_event:event_props()) -> 'ok').
-
--endif.
+         rabbit_framing:amqp_table(), pid()) ->
+            {'ok', pid()}.
+-spec disconnect(pid(), rabbit_event:event_props()) -> 'ok'.
 
 %%----------------------------------------------------------------------------
 
@@ -67,33 +65,62 @@ list() ->
 
 %%----------------------------------------------------------------------------
 
-connect({none, _}, VHost, Protocol, Pid, Infos) ->
-    connect0(fun () -> {ok, rabbit_auth_backend_dummy:user()} end,
-             VHost, Protocol, Pid, Infos);
+auth_fun({none, _}, _VHost) ->
+    fun () -> {ok, rabbit_auth_backend_dummy:user()} end;
 
-connect({Username, none}, VHost, Protocol, Pid, Infos) ->
-    connect0(fun () -> rabbit_access_control:check_user_login(Username, []) end,
-             VHost, Protocol, Pid, Infos);
+auth_fun({Username, none}, _VHost) ->
+    fun () -> rabbit_access_control:check_user_login(Username, []) end;
 
-connect({Username, Password}, VHost, Protocol, Pid, Infos) ->
-    connect0(fun () -> rabbit_access_control:check_user_pass_login(
-                         Username, Password) end,
-             VHost, Protocol, Pid, Infos).
+auth_fun({Username, Password}, VHost) ->
+    fun () ->
+        rabbit_access_control:check_user_login(
+            Username,
+            [{password, Password}, {vhost, VHost}])
+    end.
 
-connect0(AuthFun, VHost, Protocol, Pid, Infos) ->
+connect(Creds, VHost, Protocol, Pid, Infos) ->
+    AuthFun = auth_fun(Creds, VHost),
     case rabbit:is_running() of
-        true  -> case AuthFun() of
-                     {ok, User = #user{username = Username}} ->
-                         notify_auth_result(Username,
-                           user_authentication_success, []),
-                         connect1(User, VHost, Protocol, Pid, Infos);
-                     {refused, Username, Msg, Args} ->
-                         notify_auth_result(Username,
-                           user_authentication_failure,
-                           [{error, rabbit_misc:format(Msg, Args)}]),
-                         {error, {auth_failure, "Refused"}}
-                 end;
+        true  ->
+            case is_over_connection_limit(VHost, Creds, Pid) of
+                true  ->
+                    {error, not_allowed};
+                false ->
+                    case AuthFun() of
+                        {ok, User = #user{username = Username}} ->
+                            notify_auth_result(Username,
+                                user_authentication_success, []),
+                            connect1(User, VHost, Protocol, Pid, Infos);
+                        {refused, Username, Msg, Args} ->
+                            notify_auth_result(Username,
+                                user_authentication_failure,
+                                [{error, rabbit_misc:format(Msg, Args)}]),
+                            {error, {auth_failure, "Refused"}}
+                    end
+            end;
         false -> {error, broker_not_found_on_node}
+    end.
+
+is_over_connection_limit(VHost, {Username, _Password}, Pid) ->
+    PrintedUsername = case Username of
+        none -> "";
+        _    -> Username
+    end,
+    try rabbit_vhost_limit:is_over_connection_limit(VHost) of
+        false         -> false;
+        {true, Limit} ->
+            rabbit_log_connection:error(
+                "Error on Direct connection ~p~n"
+                "access to vhost '~s' refused for user '~s': "
+                "connection limit (~p) is reached",
+                [Pid, VHost, PrintedUsername, Limit]),
+            true
+    catch
+        throw:{error, {no_such_vhost, VHost}} ->
+            rabbit_log_connection:error(
+                "Error on Direct connection ~p~n"
+                "vhost ~s not found", [Pid, VHost]),
+            true
     end.
 
 notify_auth_result(Username, AuthResult, ExtraProps) ->
@@ -114,8 +141,8 @@ connect1(User, VHost, Protocol, Pid, Infos) ->
               rabbit_event:notify(connection_created, Infos),
               {ok, {User, rabbit_reader:server_properties(Protocol)}}
     catch
-        exit:#amqp_error{name = access_refused} ->
-            {error, access_refused}
+        exit:#amqp_error{name = Reason = not_allowed} ->
+            {error, Reason}
     end.
 
 start_channel(Number, ClientChannelPid, ConnPid, ConnName, Protocol, User,

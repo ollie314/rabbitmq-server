@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 %% In practice Erlang shouldn't be allowed to grow to more than a half
@@ -49,6 +49,7 @@
 %% wrong. Scale by vm_memory_high_watermark in configuration to get a
 %% sensible value.
 -define(MEMORY_SIZE_FOR_UNKNOWN_OS, 1073741824).
+-define(DEFAULT_VM_MEMORY_HIGH_WATERMARK, 0.4).
 
 -record(state, {total_memory,
                 memory_limit,
@@ -61,21 +62,17 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--type(vm_memory_high_watermark() :: (float() | {'absolute', integer()})).
--spec(start_link/1 :: (float()) -> rabbit_types:ok_pid_or_error()).
--spec(start_link/3 :: (float(), fun ((any()) -> 'ok'),
-                       fun ((any()) -> 'ok')) -> rabbit_types:ok_pid_or_error()).
--spec(get_total_memory/0 :: () -> (non_neg_integer() | 'unknown')).
--spec(get_vm_limit/0 :: () -> non_neg_integer()).
--spec(get_check_interval/0 :: () -> non_neg_integer()).
--spec(set_check_interval/1 :: (non_neg_integer()) -> 'ok').
--spec(get_vm_memory_high_watermark/0 :: () -> vm_memory_high_watermark()).
--spec(set_vm_memory_high_watermark/1 :: (vm_memory_high_watermark()) -> 'ok').
--spec(get_memory_limit/0 :: () -> non_neg_integer()).
-
--endif.
+-type vm_memory_high_watermark() :: (float() | {'absolute', integer() | string()}).
+-spec start_link(float()) -> rabbit_types:ok_pid_or_error().
+-spec start_link(float(), fun ((any()) -> 'ok'),
+                       fun ((any()) -> 'ok')) -> rabbit_types:ok_pid_or_error().
+-spec get_total_memory() -> (non_neg_integer() | 'unknown').
+-spec get_vm_limit() -> non_neg_integer().
+-spec get_check_interval() -> non_neg_integer().
+-spec set_check_interval(non_neg_integer()) -> 'ok'.
+-spec get_vm_memory_high_watermark() -> vm_memory_high_watermark().
+-spec set_vm_memory_high_watermark(vm_memory_high_watermark()) -> 'ok'.
+-spec get_memory_limit() -> non_neg_integer().
 
 %%----------------------------------------------------------------------------
 %% Public API
@@ -208,7 +205,7 @@ set_mem_limits(State, MemLimit) ->
             _ ->
                 TotalMemory
         end,
-    MemLim = interpret_limit(MemLimit, UsableMemory),
+    MemLim = interpret_limit(parse_mem_limit(MemLimit), UsableMemory),
     error_logger:info_msg("Memory limit set to ~pMB of ~pMB total.~n",
                           [trunc(MemLim/?ONE_MB), trunc(TotalMemory/?ONE_MB)]),
     internal_update(State #state { total_memory    = TotalMemory,
@@ -216,10 +213,23 @@ set_mem_limits(State, MemLimit) ->
                                    memory_config_limit = MemLimit}).
 
 interpret_limit({'absolute', MemLim}, UsableMemory) ->
-    %% Absolute memory is provided in MB
-    min(MemLim * ?ONE_MB, UsableMemory);
+    erlang:min(MemLim, UsableMemory);
 interpret_limit(MemFraction, UsableMemory) ->
     trunc(MemFraction * UsableMemory).
+
+
+parse_mem_limit({absolute, Limit}) ->
+    case rabbit_resource_monitor_misc:parse_information_unit(Limit) of
+        {ok, ParsedLimit} -> {absolute, ParsedLimit};
+        {error, parse_error} ->
+            rabbit_log:error("Unable to parse vm_memory_high_watermark value ~p", [Limit]),
+            ?DEFAULT_VM_MEMORY_HIGH_WATERMARK
+    end;
+parse_mem_limit(Relative) when is_float(Relative), Relative < 1 ->
+    Relative;
+parse_mem_limit(_) ->
+    ?DEFAULT_VM_MEMORY_HIGH_WATERMARK.
+
 
 internal_update(State = #state { memory_limit = MemLimit,
                                  alarmed      = Alarmed,
@@ -394,7 +404,7 @@ sysctl(Def) ->
 read_proc_file(File) ->
     {ok, IoDevice} = file:open(File, [read, raw]),
     Res = read_proc_file(IoDevice, []),
-    file:close(IoDevice),
+    _ = file:close(IoDevice),
     lists:flatten(lists:reverse(Res)).
 
 -define(BUFFER_SIZE, 1024).

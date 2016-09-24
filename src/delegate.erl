@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(delegate).
@@ -57,28 +57,24 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([monitor_ref/0]).
 
--type(monitor_ref() :: reference() | {atom(), pid()}).
--type(fun_or_mfa(A) :: fun ((pid()) -> A) | {atom(), atom(), [any()]}).
+-type monitor_ref() :: reference() | {atom(), pid()}.
+-type fun_or_mfa(A) :: fun ((pid()) -> A) | {atom(), atom(), [any()]}.
 
--spec(start_link/1 ::
-        (non_neg_integer()) -> {'ok', pid()} | ignore | {'error', any()}).
--spec(invoke/2 :: ( pid(),  fun_or_mfa(A)) -> A;
-                  ([pid()], fun_or_mfa(A)) -> {[{pid(), A}],
-                                               [{pid(), term()}]}).
--spec(invoke_no_result/2 :: (pid() | [pid()], fun_or_mfa(any())) -> 'ok').
--spec(monitor/2 :: ('process', pid()) -> monitor_ref()).
--spec(demonitor/1 :: (monitor_ref()) -> 'true').
+-spec start_link
+        (non_neg_integer()) -> {'ok', pid()} | ignore | {'error', any()}.
+-spec invoke
+        ( pid(),  fun_or_mfa(A)) -> A;
+        ([pid()], fun_or_mfa(A)) -> {[{pid(), A}], [{pid(), term()}]}.
+-spec invoke_no_result(pid() | [pid()], fun_or_mfa(any())) -> 'ok'.
+-spec monitor('process', pid()) -> monitor_ref().
+-spec demonitor(monitor_ref()) -> 'true'.
 
--spec(call/2 ::
+-spec call
         ( pid(),  any()) -> any();
-        ([pid()], any()) -> {[{pid(), any()}], [{pid(), term()}]}).
--spec(cast/2 :: (pid() | [pid()], any()) -> 'ok').
-
--endif.
+        ([pid()], any()) -> {[{pid(), any()}], [{pid(), term()}]}.
+-spec cast(pid() | [pid()], any()) -> 'ok'.
 
 %%----------------------------------------------------------------------------
 
@@ -131,7 +127,7 @@ invoke(Pids, FunOrMFA) when is_list(Pids) ->
       end, {[], BadPids}, ResultsNoNode).
 
 invoke_no_result(Pid, FunOrMFA) when is_pid(Pid) andalso node(Pid) =:= node() ->
-    safe_invoke(Pid, FunOrMFA), %% we don't care about any error
+    _ = safe_invoke(Pid, FunOrMFA), %% we don't care about any error
     ok;
 invoke_no_result(Pid, FunOrMFA) when is_pid(Pid) ->
     invoke_no_result([Pid], FunOrMFA);
@@ -139,7 +135,7 @@ invoke_no_result(Pid, FunOrMFA) when is_pid(Pid) ->
 invoke_no_result([], _FunOrMFA) -> %% optimisation
     ok;
 invoke_no_result([Pid], FunOrMFA) when node(Pid) =:= node() -> %% optimisation
-    safe_invoke(Pid, FunOrMFA), %% must not die
+    _ = safe_invoke(Pid, FunOrMFA), %% must not die
     ok;
 invoke_no_result(Pids, FunOrMFA) when is_list(Pids) ->
     {LocalPids, Grouped} = group_pids_by_node(Pids),
@@ -149,7 +145,7 @@ invoke_no_result(Pids, FunOrMFA) when is_list(Pids) ->
                          RemoteNodes, delegate(self(), RemoteNodes),
                          {invoke, FunOrMFA, Grouped})
     end,
-    safe_invoke(LocalPids, FunOrMFA), %% must not die
+    _ = safe_invoke(LocalPids, FunOrMFA), %% must not die
     ok.
 
 monitor(process, Pid) when node(Pid) =:= node() ->
@@ -247,7 +243,7 @@ handle_cast({demonitor, MonitoringPid, Pid},
     {noreply, State#state{monitors = Monitors1}, hibernate};
 
 handle_cast({invoke, FunOrMFA, Grouped}, State = #state{node = Node}) ->
-    safe_invoke(orddict:fetch(Node, Grouped), FunOrMFA),
+    _ = safe_invoke(orddict:fetch(Node, Grouped), FunOrMFA),
     {noreply, State, hibernate}.
 
 handle_info({'DOWN', Ref, process, Pid, Info},

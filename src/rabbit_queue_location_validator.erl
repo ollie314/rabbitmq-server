@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_queue_location_validator).
@@ -25,20 +25,22 @@
                    [{description, "Queue location policy validation"},
                     {mfa, {rabbit_registry, register,
                            [policy_validator,
-                            <<"x-queue-master-locator">>,
-                            ?MODULE]}}]}).
+                            <<"queue-master-locator">>,
+                            ?MODULE]}},
+		    {requires, rabbit_registry},
+		    {enables, recovery}]}).
 
 validate_policy(KeyList) ->
-    case proplists:lookup(<<"x-queue-master-locator">> , KeyList) of
+    case proplists:lookup(<<"queue-master-locator">> , KeyList) of
         {_, Strategy} -> validate_strategy(Strategy);
-        _             -> {error, "x-queue-master-locator undefined"}
+        _             -> {error, "queue-master-locator undefined"}
     end.
 
 validate_strategy(Strategy) ->
     case module(Strategy) of
-        R={ok, _M} -> R;
-        _          ->
-            {error, "~p invalid x-queue-master-locator value", [Strategy]}
+        R = {ok, _M} -> R;
+        _            ->
+            {error, "~p invalid queue-master-locator value", [Strategy]}
     end.
 
 policy(Policy, Q) ->
@@ -48,7 +50,7 @@ policy(Policy, Q) ->
     end.
 
 module(#amqqueue{} = Q) ->
-    case policy(<<"x-queue-master-locator">>, Q) of
+    case policy(<<"queue-master-locator">>, Q) of
         undefined -> no_location_strategy;
         Mode      -> module(Mode)
     end;
@@ -63,6 +65,7 @@ module(Strategy) when is_binary(Strategy) ->
                         non_existing -> no_location_strategy;
                         _            -> {ok, Module}
                     end;
-                _            -> no_location_strategy
+                _            ->
+                    no_location_strategy
             end
     end.

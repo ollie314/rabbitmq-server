@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_amqqueue_process).
@@ -33,46 +33,82 @@
          prioritise_cast/3, prioritise_info/3, format_message_queue/2]).
 
 %% Queue's state
--record(q, {q,
+-record(q, {
+            %% an #amqqueue record
+            q,
+            %% none | {exclusive consumer channel PID, consumer tag}
             exclusive_consumer,
+            %% Set to true if a queue has ever had a consumer.
+            %% This is used to determine when to delete auto-delete queues.
             has_had_consumers,
+            %% backing queue module.
+            %% for mirrored queues, this will be rabbit_mirror_queue_master.
+            %% for non-priority and non-mirrored queues, rabbit_variable_queue.
+            %% see rabbit_backing_queue.
             backing_queue,
+            %% backing queue state.
+            %% see rabbit_backing_queue, rabbit_variable_queue.
             backing_queue_state,
+            %% consumers state, see rabbit_queue_consumers
             consumers,
+            %% queue expiration value
             expires,
+            %% timer used to periodically sync (flush) queue index
             sync_timer_ref,
+            %% timer used to update ingress/egress rates and queue RAM duration target
             rate_timer_ref,
+            %% timer used to clean up this queue due to TTL (on when unused)
             expiry_timer_ref,
+            %% stats emission timer
             stats_timer,
+            %% maps message IDs to {channel pid, MsgSeqNo}
+            %% pairs
             msg_id_to_channel,
+            %% message TTL value
             ttl,
+            %% timer used to delete expired messages
             ttl_timer_ref,
             ttl_timer_expiry,
+            %% Keeps track of channels that publish to this queue.
+            %% When channel process goes down, queues have to perform
+            %% certain cleanup.
             senders,
+            %% dead letter exchange as a #resource record, if any
             dlx,
             dlx_routing_key,
+            %% max length in messages, if configured
             max_length,
+            %% max length in bytes, if configured
             max_bytes,
+            %% when policies change, this version helps queue
+            %% determine what previously scheduled/set up state to ignore,
+            %% e.g. message expiration messages from previously set up timers
+            %% that may or may not be still valid
             args_policy_version,
+            %% used to discard outdated/superseded policy updates,
+            %% e.g. when policies are applied concurrently. See
+            %% https://github.com/rabbitmq/rabbitmq-server/issues/803 for one
+            %% example.
+            mirroring_policy_version = 0,
+            %% running | flow | idle
             status
            }).
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(info_keys/0 :: () -> rabbit_types:info_keys()).
--spec(init_with_backing_queue_state/7 ::
+-spec info_keys() -> rabbit_types:info_keys().
+-spec init_with_backing_queue_state
         (rabbit_types:amqqueue(), atom(), tuple(), any(),
-         [rabbit_types:delivery()], pmon:pmon(), dict:dict()) -> #q{}).
-
--endif.
+         [rabbit_types:delivery()], pmon:pmon(), dict:dict()) ->
+            #q{}.
 
 %%----------------------------------------------------------------------------
 
 -define(STATISTICS_KEYS,
         [name,
          policy,
+         operator_policy,
+         effective_policy_definition,
          exclusive_consumer_pid,
          exclusive_consumer_tag,
          messages_ready,
@@ -84,7 +120,9 @@
          slave_pids,
          synchronised_slave_pids,
          recoverable_slaves,
-         state
+         state,
+         reductions,
+         garbage_collection
         ]).
 
 -define(CREATION_EVENT_KEYS,
@@ -142,6 +180,7 @@ init_it(Recover, From, State = #q{q = #amqqueue{exclusive_owner = Owner}}) ->
                  {_, Terms} = recovery_status(Recover),
                  BQS = bq_init(BQ, Q, Terms),
                  %% Rely on terminate to delete the queue.
+                 log_delete_exclusive(Owner, State),
                  {stop, {shutdown, missing_owner},
                   State#q{backing_queue = BQ, backing_queue_state = BQS}}
     end.
@@ -318,7 +357,8 @@ process_args_policy(State = #q{q                   = Q,
          {<<"dead-letter-routing-key">>, fun res_arg/2, fun init_dlx_rkey/2},
          {<<"message-ttl">>,             fun res_min/2, fun init_ttl/2},
          {<<"max-length">>,              fun res_min/2, fun init_max_length/2},
-         {<<"max-length-bytes">>,        fun res_min/2, fun init_max_bytes/2}],
+         {<<"max-length-bytes">>,        fun res_min/2, fun init_max_bytes/2},
+         {<<"queue-mode">>,              fun res_arg/2, fun init_queue_mode/2}],
       drop_expired_msgs(
          lists:foldl(fun({Name, Resolve, Fun}, StateN) ->
                              Fun(args_policy_lookup(Name, Resolve, Q), StateN)
@@ -360,6 +400,13 @@ init_max_length(MaxLen, State) ->
 init_max_bytes(MaxBytes, State) ->
     {_Dropped, State1} = maybe_drop_head(State#q{max_bytes = MaxBytes}),
     State1.
+
+init_queue_mode(undefined, State) ->
+    State;
+init_queue_mode(Mode, State = #q {backing_queue = BQ,
+                                  backing_queue_state = BQS}) ->
+    BQS1 = BQ:set_queue_mode(binary_to_existing_atom(Mode, utf8), BQS),
+    State#q{backing_queue_state = BQS1}.
 
 reply(Reply, NewState) ->
     {NewState1, Timeout} = next_state(NewState),
@@ -422,7 +469,7 @@ ensure_ttl_timer(undefined, State) ->
     State;
 ensure_ttl_timer(Expiry, State = #q{ttl_timer_ref       = undefined,
                                     args_policy_version = Version}) ->
-    After = (case Expiry - time_compat:os_system_time(micro_seconds) of
+    After = (case Expiry - os:system_time(micro_seconds) of
                  V when V > 0 -> V + 999; %% always fire later
                  _            -> 0
              end) div 1000,
@@ -693,7 +740,13 @@ handle_ch_down(DownPid, State = #q{consumers          = Consumers,
                               exclusive_consumer = Holder1},
             notify_decorators(State2),
             case should_auto_delete(State2) of
-                true  -> {stop, State2};
+                true  ->
+                    log_auto_delete(
+                        io_lib:format(
+                            "because all of its consumers (~p) were on a channel that was closed",
+                            [length(ChCTags)]),
+                        State),
+                    {stop, State2};
                 false -> {ok, requeue_and_run(ChAckTags,
                                               ensure_expiry_timer(State2))}
             end
@@ -742,7 +795,7 @@ calculate_msg_expiry(#basic_message{content = Content}, TTL) ->
     {ok, MsgTTL} = rabbit_basic:parse_expiration(Props),
     case lists:min([TTL, MsgTTL]) of
         undefined -> undefined;
-        T         -> time_compat:os_system_time(micro_seconds) + T * 1000
+        T         -> os:system_time(micro_seconds) + T * 1000
     end.
 
 %% Logically this function should invoke maybe_send_drained/2.
@@ -753,7 +806,7 @@ calculate_msg_expiry(#basic_message{content = Content}, TTL) ->
 drop_expired_msgs(State) ->
     case is_empty(State) of
         true  -> State;
-        false -> drop_expired_msgs(time_compat:os_system_time(micro_seconds),
+        false -> drop_expired_msgs(os:system_time(micro_seconds),
                                    State)
     end.
 
@@ -836,6 +889,16 @@ i(policy,    #q{q = Q}) ->
         none   -> '';
         Policy -> Policy
     end;
+i(operator_policy,    #q{q = Q}) ->
+    case rabbit_policy:name_op(Q) of
+        none   -> '';
+        Policy -> Policy
+    end;
+i(effective_policy_definition,  #q{q = Q}) ->
+    case rabbit_policy:effective_definition(Q) of
+        undefined -> [];
+        Def       -> Def
+    end;
 i(exclusive_consumer_pid, #q{exclusive_consumer = none}) ->
     '';
 i(exclusive_consumer_pid, #q{exclusive_consumer = {ChPid, _ConsumerTag}}) ->
@@ -885,6 +948,11 @@ i(recoverable_slaves, #q{q = #amqqueue{name    = Name,
     end;
 i(state, #q{status = running}) -> credit_flow:state();
 i(state, #q{status = State})   -> State;
+i(garbage_collection, _State) ->
+    rabbit_misc:get_gc_info(self());
+i(reductions, _State) ->
+    {reductions, Reductions} = erlang:process_info(self(), reductions),
+    Reductions;
 i(Item, #q{backing_queue_state = BQS, backing_queue = BQ}) ->
     BQ:info(Item, BQS).
 
@@ -931,6 +999,7 @@ prioritise_call(Msg, _From, _Len, State) ->
 prioritise_cast(Msg, _Len, State) ->
     case Msg of
         delete_immediately                   -> 8;
+        {delete_exclusive, _Pid}             -> 8;
         {set_ram_duration_target, _Duration} -> 8;
         {set_maximum_since_use, _Age}        -> 8;
         {run_backing_queue, _Mod, _Fun}      -> 6;
@@ -968,7 +1037,17 @@ prioritise_info(Msg, _Len, #q{q = #amqqueue{exclusive_owner = DownPid}}) ->
     end.
 
 handle_call({init, Recover}, From, State) ->
-    init_it(Recover, From, State);
+    try
+	init_it(Recover, From, State)
+    catch
+	{coordinator_not_started, Reason} ->
+	    %% The GM can shutdown before the coordinator has started up
+	    %% (lost membership or missing group), thus the start_link of
+	    %% the coordinator returns {error, shutdown} as rabbit_amqqueue_process
+	    %% is trapping exists. The master captures this return value and
+	    %% throws the current exception.
+	    {stop, Reason, State}
+    end;
 
 handle_call(info, _From, State) ->
     reply(infos(info_keys(), State), State);
@@ -1055,7 +1134,13 @@ handle_call({basic_cancel, ChPid, ConsumerTag, OkMsg}, _From,
             notify_decorators(State1),
             case should_auto_delete(State1) of
                 false -> reply(ok, ensure_expiry_timer(State1));
-                true  -> stop(ok, State1)
+                true  ->
+                    log_auto_delete(
+                        io_lib:format(
+                            "because its last consumer with tag '~s' was cancelled",
+                            [ConsumerTag]),
+                        State),
+                    stop(ok, State1)
             end
     end;
 
@@ -1114,7 +1199,17 @@ handle_call(cancel_sync_mirrors, _From, State) ->
     reply({ok, not_syncing}, State).
 
 handle_cast(init, State) ->
-    init_it({no_barrier, non_clean_shutdown}, none, State);
+    try
+	init_it({no_barrier, non_clean_shutdown}, none, State)
+    catch
+	{coordinator_not_started, Reason} ->
+	    %% The GM can shutdown before the coordinator has started up
+	    %% (lost membership or missing group), thus the start_link of
+	    %% the coordinator returns {error, shutdown} as rabbit_amqqueue_process
+	    %% is trapping exists. The master captures this return value and
+	    %% throws the current exception.
+	    {stop, Reason, State}
+    end;
 
 handle_cast({run_backing_queue, Mod, Fun},
             State = #q{backing_queue = BQ, backing_queue_state = BQS}) ->
@@ -1157,6 +1252,10 @@ handle_cast({reject, false, AckTags, ChPid}, State) ->
                                        end) end,
               fun () -> ack(AckTags, ChPid, State) end));
 
+handle_cast({delete_exclusive, ConnPid}, State) ->
+    log_delete_exclusive(ConnPid, State),
+    stop(State);
+
 handle_cast(delete_immediately, State) ->
     stop(State);
 
@@ -1181,22 +1280,15 @@ handle_cast({set_maximum_since_use, Age}, State) ->
     ok = file_handle_cache:set_maximum_since_use(Age),
     noreply(State);
 
-handle_cast(start_mirroring, State = #q{backing_queue       = BQ,
-                                        backing_queue_state = BQS}) ->
-    %% lookup again to get policy for init_with_existing_bq
-    {ok, Q} = rabbit_amqqueue:lookup(qname(State)),
-    true = BQ =/= rabbit_mirror_queue_master, %% assertion
-    BQ1 = rabbit_mirror_queue_master,
-    BQS1 = BQ1:init_with_existing_bq(Q, BQ, BQS),
-    noreply(State#q{backing_queue       = BQ1,
-                    backing_queue_state = BQS1});
-
-handle_cast(stop_mirroring, State = #q{backing_queue       = BQ,
-                                       backing_queue_state = BQS}) ->
-    BQ = rabbit_mirror_queue_master, %% assertion
-    {BQ1, BQS1} = BQ:stop_mirroring(BQS),
-    noreply(State#q{backing_queue       = BQ1,
-                    backing_queue_state = BQS1});
+handle_cast(update_mirroring, State = #q{q = Q,
+                                         mirroring_policy_version = Version}) ->
+    case needs_update_mirroring(Q, Version) of
+        false ->
+            noreply(State);
+        {Policy, NewVersion} ->
+            State1 = State#q{mirroring_policy_version = NewVersion},
+            noreply(update_mirroring(Policy, State1))
+    end;
 
 handle_cast({credit, ChPid, CTag, Credit, Drain},
             State = #q{consumers           = Consumers,
@@ -1276,6 +1368,7 @@ handle_info({'DOWN', _MonitorRef, process, DownPid, _Reason},
     %% match what people expect (see bug 21824). However we need this
     %% monitor-and-async- delete in case the connection goes away
     %% unexpectedly.
+    log_delete_exclusive(DownPid, State),
     stop(State);
 
 handle_info({'DOWN', _MonitorRef, process, DownPid, _Reason}, State) ->
@@ -1331,7 +1424,7 @@ handle_pre_hibernate(State = #q{backing_queue = BQ,
       State, #q.stats_timer,
       fun () -> emit_stats(State,
                            [{idle_since,
-                             time_compat:os_system_time(milli_seconds)},
+                             os:system_time(milli_seconds)},
                             {consumer_utilisation, ''}])
                 end),
     State1 = rabbit_event:stop_stats_timer(State#q{backing_queue_state = BQS3},
@@ -1339,3 +1432,73 @@ handle_pre_hibernate(State = #q{backing_queue = BQ,
     {hibernate, stop_rate_timer(State1)}.
 
 format_message_queue(Opt, MQ) -> rabbit_misc:format_message_queue(Opt, MQ).
+
+log_delete_exclusive({ConPid, _ConRef}, State) ->
+    log_delete_exclusive(ConPid, State);
+log_delete_exclusive(ConPid, #q{ q = #amqqueue{ name = Resource } }) ->
+    #resource{ name = QName, virtual_host = VHost } = Resource,
+    rabbit_log_queue:debug("Deleting exclusive queue '~s' in vhost '~s' " ++
+                           "because its declaring connection ~p was closed",
+                           [QName, VHost, ConPid]).
+
+log_auto_delete(Reason, #q{ q = #amqqueue{ name = Resource } }) ->
+    #resource{ name = QName, virtual_host = VHost } = Resource,
+    rabbit_log_queue:debug("Deleting auto-delete queue '~s' in vhost '~s' " ++
+                           Reason,
+                           [QName, VHost]).
+
+needs_update_mirroring(Q, Version) ->
+    {ok, UpQ} = rabbit_amqqueue:lookup(Q#amqqueue.name),
+    DBVersion = UpQ#amqqueue.policy_version,
+    case DBVersion > Version of
+        true -> {rabbit_policy:get(<<"ha-mode">>, UpQ), DBVersion};
+        false -> false
+    end.
+
+
+update_mirroring(Policy, State = #q{backing_queue = BQ}) ->
+    case update_to(Policy, BQ) of
+        start_mirroring ->
+            start_mirroring(State);
+        stop_mirroring ->
+            stop_mirroring(State);
+        ignore ->
+            State;
+        update_ha_mode ->
+            update_ha_mode(State)
+    end.
+
+update_to(undefined, rabbit_mirror_queue_master) ->
+    stop_mirroring;
+update_to(_, rabbit_mirror_queue_master) ->
+    update_ha_mode;
+update_to(undefined, BQ) when BQ =/= rabbit_mirror_queue_master ->
+    ignore;
+update_to(_, BQ) when BQ =/= rabbit_mirror_queue_master ->
+    start_mirroring.
+
+start_mirroring(State = #q{backing_queue       = BQ,
+                           backing_queue_state = BQS}) ->
+    %% lookup again to get policy for init_with_existing_bq
+    {ok, Q} = rabbit_amqqueue:lookup(qname(State)),
+    true = BQ =/= rabbit_mirror_queue_master, %% assertion
+    BQ1 = rabbit_mirror_queue_master,
+    BQS1 = BQ1:init_with_existing_bq(Q, BQ, BQS),
+    State#q{backing_queue       = BQ1,
+            backing_queue_state = BQS1}.
+
+stop_mirroring(State = #q{backing_queue       = BQ,
+                          backing_queue_state = BQS}) ->
+    BQ = rabbit_mirror_queue_master, %% assertion
+    {BQ1, BQS1} = BQ:stop_mirroring(BQS),
+    State#q{backing_queue       = BQ1,
+            backing_queue_state = BQS1}.
+
+update_ha_mode(State) ->
+    {ok, Q} = rabbit_amqqueue:lookup(qname(State)),
+    ok = rabbit_mirror_queue_misc:update_mirrors(Q),
+    State.
+
+
+
+

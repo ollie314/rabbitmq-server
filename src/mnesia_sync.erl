@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(mnesia_sync).
@@ -34,11 +34,7 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(sync/0 :: () -> 'ok').
-
--endif.
+-spec sync() -> 'ok'.
 
 %%----------------------------------------------------------------------------
 
@@ -65,7 +61,7 @@ handle_cast(Request, State) ->
 
 handle_info(timeout, #state{waiting = Waiting} = State) ->
     ok = disk_log:sync(latest_log),
-    [gen_server:reply(From, ok) || From <- Waiting],
+    _ = [gen_server:reply(From, ok) || From <- Waiting],
     {noreply, State#state{waiting = []}};
 handle_info(Message, State) ->
     {stop, {unhandled_info, Message}, State}.

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_access_control).
@@ -23,31 +23,28 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([permission_atom/0]).
 
--type(permission_atom() :: 'configure' | 'read' | 'write').
+-type permission_atom() :: 'configure' | 'read' | 'write'.
 
--spec(check_user_pass_login/2 ::
-        (rabbit_types:username(), rabbit_types:password())
-        -> {'ok', rabbit_types:user()} |
-           {'refused', rabbit_types:username(), string(), [any()]}).
--spec(check_user_login/2 ::
-        (rabbit_types:username(), [{atom(), any()}])
-        -> {'ok', rabbit_types:user()} |
-           {'refused', rabbit_types:username(), string(), [any()]}).
--spec(check_user_loopback/2 :: (rabbit_types:username(),
-                                rabbit_net:socket() | inet:ip_address())
-        -> 'ok' | 'not_allowed').
--spec(check_vhost_access/3 ::
-        (rabbit_types:user(), rabbit_types:vhost(), rabbit_net:socket() | #authz_socket_info{})
-        -> 'ok' | rabbit_types:channel_exit()).
--spec(check_resource_access/3 ::
-        (rabbit_types:user(), rabbit_types:r(atom()), permission_atom())
-        -> 'ok' | rabbit_types:channel_exit()).
-
--endif.
+-spec check_user_pass_login
+        (rabbit_types:username(), rabbit_types:password()) ->
+            {'ok', rabbit_types:user()} |
+            {'refused', rabbit_types:username(), string(), [any()]}.
+-spec check_user_login
+        (rabbit_types:username(), [{atom(), any()}]) ->
+            {'ok', rabbit_types:user()} |
+            {'refused', rabbit_types:username(), string(), [any()]}.
+-spec check_user_loopback
+        (rabbit_types:username(), rabbit_net:socket() | inet:ip_address()) ->
+            'ok' | 'not_allowed'.
+-spec check_vhost_access
+        (rabbit_types:user(), rabbit_types:vhost(),
+         rabbit_net:socket() | #authz_socket_info{}) ->
+            'ok' | rabbit_types:channel_exit().
+-spec check_resource_access
+        (rabbit_types:user(), rabbit_types:r(atom()), permission_atom()) ->
+            'ok' | rabbit_types:channel_exit().
 
 %%----------------------------------------------------------------------------
 
@@ -142,7 +139,7 @@ check_vhost_access(User = #user{username       = Username,
                               auth_user(User, Impl), VHostPath, Sock)
                 end,
                 Mod, "access to vhost '~s' refused for user '~s'",
-                [VHostPath, Username]);
+                [VHostPath, Username], not_allowed);
          (_, Else) ->
               Else
       end, ok, Modules).
@@ -164,7 +161,11 @@ check_resource_access(User = #user{username       = Username,
          (_, Else) -> Else
       end, ok, Modules).
 
+
 check_access(Fun, Module, ErrStr, ErrArgs) ->
+    check_access(Fun, Module, ErrStr, ErrArgs, access_refused).
+
+check_access(Fun, Module, ErrStr, ErrArgs, ErrName) ->
     Allow = case Fun() of
                 {error, E}  ->
                     rabbit_log:error(ErrStr ++ " by ~s: ~p~n",
@@ -177,5 +178,5 @@ check_access(Fun, Module, ErrStr, ErrArgs) ->
         true ->
             ok;
         false ->
-            rabbit_misc:protocol_error(access_refused, ErrStr, ErrArgs)
+            rabbit_misc:protocol_error(ErrName, ErrStr, ErrArgs)
     end.

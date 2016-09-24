@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_queue_location_min_masters).
@@ -74,4 +74,6 @@ get_queue_master_per_binding(VHost, [#binding{destination=
                                [Master|QueueMastersAcc];
                            _ -> QueueMastersAcc
                        end,
-    get_queue_master_per_binding(VHost, RemBindings, QueueMastersAcc0).
+    get_queue_master_per_binding(VHost, RemBindings, QueueMastersAcc0);
+get_queue_master_per_binding(VHost, [_|RemBindings], QueueMastersAcc) ->
+    get_queue_master_per_binding(VHost, RemBindings, QueueMastersAcc).

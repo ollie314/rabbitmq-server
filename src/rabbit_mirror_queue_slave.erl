@@ -120,7 +120,7 @@ handle_go(Q = #amqqueue{name = QName}) ->
                    Self, {rabbit_amqqueue, set_ram_duration_target, [Self]}),
             {ok, BQ} = application:get_env(backing_queue_module),
             Q1 = Q #amqqueue { pid = QPid },
-            ok = rabbit_queue_index:erase(QName), %% For crash recovery
+            _ = BQ:delete_crashed(Q), %% For crash recovery
             BQS = bq_init(BQ, Q1, new),
             State = #state { q                   = Q1,
                              gm                  = GM,
@@ -163,9 +163,11 @@ handle_go(Q = #amqqueue{name = QName}) ->
 
 init_it(Self, GM, Node, QName) ->
     case mnesia:read({rabbit_queue, QName}) of
-        [Q = #amqqueue { pid = QPid, slave_pids = SPids, gm_pids = GMPids }] ->
+        [Q = #amqqueue { pid = QPid, slave_pids = SPids, gm_pids = GMPids,
+                         slave_pids_pending_shutdown = PSPids}] ->
             case [Pid || Pid <- [QPid | SPids], node(Pid) =:= Node] of
-                []     -> add_slave(Q, Self, GM),
+                []     -> stop_pending_slaves(QName, PSPids),
+                          add_slave(Q, Self, GM),
                           {new, QPid, GMPids};
                 [QPid] -> case rabbit_mnesia:is_process_alive(QPid) of
                               true  -> duplicate_live_master;
@@ -185,6 +187,26 @@ init_it(Self, GM, Node, QName) ->
         [] ->
             master_in_recovery
     end.
+
+%% Pending slaves have been asked to stop by the master, but despite the node
+%% being up these did not answer on the expected timeout. Stop local slaves now.
+stop_pending_slaves(QName, Pids) ->
+    [begin
+         rabbit_mirror_queue_misc:log_warning(
+           QName, "Detected stale HA slave, stopping it: ~p~n", [Pid]),
+         case erlang:process_info(Pid, dictionary) of
+             undefined -> ok;
+             {dictionary, Dict} ->
+                 case proplists:get_value('$ancestors', Dict) of
+                     [Sup, rabbit_amqqueue_sup_sup | _] ->
+                         exit(Sup, kill),
+                         exit(Pid, kill);
+                     _ ->
+                         ok
+                 end
+         end
+     end || Pid <- Pids, node(Pid) =:= node(),
+            true =:= erlang:is_process_alive(Pid)].
 
 %% Add to the end, so they are in descending order of age, see
 %% rabbit_mirror_queue_misc:promote_slave/1
@@ -225,9 +247,15 @@ handle_call({gm_deaths, DeadGMPids}, From,
                 _ ->
                     %% master has changed to not us
                     gen_server2:reply(From, ok),
-                    %% assertion, we don't need to add_mirrors/2 in this
-                    %% branch, see last clause in remove_from_queue/2
-                    [] = ExtraNodes,
+                    %% see rabbitmq-server#914;
+                    %% It's not always guaranteed that we won't have ExtraNodes.
+                    %% If gm alters, master can change to not us with extra nodes,
+                    %% in which case we attempt to add mirrors on those nodes.
+                    case ExtraNodes of
+                        [] -> void;
+                        _  -> rabbit_mirror_queue_misc:add_mirrors(
+                                QName, ExtraNodes, async)
+                    end,
                     %% Since GM is by nature lazy we need to make sure
                     %% there is some traffic when a master dies, to
                     %% make sure all slaves get informed of the
@@ -250,19 +278,29 @@ handle_cast(go, {not_started, Q} = NotStarted) ->
 handle_cast({run_backing_queue, Mod, Fun}, State) ->
     noreply(run_backing_queue(Mod, Fun, State));
 
-handle_cast({gm, Instruction}, State) ->
-    handle_process_result(process_instruction(Instruction, State));
+handle_cast({gm, Instruction}, State = #state{q = #amqqueue { name = QName }}) ->
+    case rabbit_amqqueue:lookup(QName) of
+	{ok, #amqqueue{slave_pids = SPids}} ->
+	    case lists:member(self(), SPids) of
+		true ->
+		    handle_process_result(process_instruction(Instruction, State));
+		false ->
+		    %% Potentially a duplicated slave caused by a partial partition,
+		    %% will stop as a new slave could start unaware of our presence
+		    {stop, shutdown, State}
+	    end;
+	{error, not_found} ->
+	    %% Would not expect this to happen after fixing #953
+	    {stop, shutdown, State}
+    end;
 
 handle_cast({deliver, Delivery = #delivery{sender = Sender, flow = Flow}, true},
             State) ->
     %% Asynchronous, non-"mandatory", deliver mode.
-    case Flow of
-        %% We are acking messages to the channel process that sent us
-        %% the message delivery. See
-        %% rabbit_amqqueue_process:handle_ch_down for more info.
-        flow   -> credit_flow:ack(Sender);
-        noflow -> ok
-    end,
+    %% We are acking messages to the channel process that sent us
+    %% the message delivery. See
+    %% rabbit_amqqueue_process:handle_ch_down for more info.
+    maybe_flow_ack(Sender, Flow),
     noreply(maybe_enqueue_message(Delivery, State));
 
 handle_cast({sync_start, Ref, Syncer},
@@ -545,9 +583,8 @@ confirm_messages(MsgIds, State = #state { msg_id_status = MS }) ->
 handle_process_result({ok,   State}) -> noreply(State);
 handle_process_result({stop, State}) -> {stop, normal, State}.
 
--ifdef(use_specs).
--spec(promote_me/2 :: ({pid(), term()}, #state{}) -> no_return()).
--endif.
+-spec promote_me({pid(), term()}, #state{}) -> no_return().
+
 promote_me(From, #state { q                   = Q = #amqqueue { name = QName },
                           gm                  = GM,
                           backing_queue       = BQ,
@@ -658,10 +695,7 @@ promote_me(From, #state { q                   = Q = #amqqueue { name = QName },
 %% need to send an ack for these messages since the channel is waiting
 %% for one for the via-GM case and we will not now receive one.
 promote_delivery(Delivery = #delivery{sender = Sender, flow = Flow}) ->
-    case Flow of
-        flow   -> credit_flow:ack(Sender);
-        noflow -> ok
-    end,
+    maybe_flow_ack(Sender, Flow),
     Delivery#delivery{mandatory = false}.
 
 noreply(State) ->
@@ -747,6 +781,7 @@ confirm_sender_death(Pid) ->
 
 forget_sender(_, running)                        -> false;
 forget_sender(down_from_gm, down_from_gm)        -> false; %% [1]
+forget_sender(down_from_ch, down_from_ch)        -> false;
 forget_sender(Down1, Down2) when Down1 =/= Down2 -> true.
 
 %% [1] If another slave goes through confirm_sender_death/1 before we
@@ -948,10 +983,15 @@ process_instruction({delete_and_terminate, Reason},
                     State = #state { backing_queue       = BQ,
                                      backing_queue_state = BQS }) ->
     BQ:delete_and_terminate(Reason, BQS),
-    {stop, State #state { backing_queue_state = undefined }}.
+    {stop, State #state { backing_queue_state = undefined }};
+process_instruction({set_queue_mode, Mode},
+                    State = #state { backing_queue       = BQ,
+                                     backing_queue_state = BQS }) ->
+    BQS1 = BQ:set_queue_mode(Mode, BQS),
+    {ok, State #state { backing_queue_state = BQS1 }}.
 
-maybe_flow_ack(ChPid, flow)    -> credit_flow:ack(ChPid);
-maybe_flow_ack(_ChPid, noflow) -> ok.
+maybe_flow_ack(Sender, flow)    -> credit_flow:ack(Sender);
+maybe_flow_ack(_Sender, noflow) -> ok.
 
 msg_ids_to_acktags(MsgIds, MA) ->
     {AckTags, MA1} =

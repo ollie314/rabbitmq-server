@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_mnesia_rename).
@@ -43,12 +43,8 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(rename/2 :: (node(), [{node(), node()}]) -> 'ok').
--spec(maybe_finish/1 :: ([node()]) -> 'ok').
-
--endif.
+-spec rename(node(), [{node(), node()}]) -> 'ok'.
+-spec maybe_finish([node()]) -> 'ok'.
 
 %%----------------------------------------------------------------------------
 
@@ -128,7 +124,13 @@ prepare(Node, NodeMapList) ->
 
 take_backup(Backup) ->
     start_mnesia(),
-    ok = mnesia:backup(Backup),
+    %% We backup only local tables: in particular, this excludes the
+    %% connection tracking tables which have no local replica.
+    LocalTables = mnesia:system_info(local_tables),
+    {ok, Name, _Nodes} = mnesia:activate_checkpoint([
+        {max, LocalTables}
+      ]),
+    ok = mnesia:backup_checkpoint(Name, Backup),
     stop_mnesia().
 
 restore_backup(Backup) ->

@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_ssl).
@@ -25,21 +25,17 @@
 
 %%--------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([certificate/0]).
 
--type(certificate() :: binary()).
+-type certificate() :: binary().
 
--spec(peer_cert_issuer/1        :: (certificate()) -> string()).
--spec(peer_cert_subject/1       :: (certificate()) -> string()).
--spec(peer_cert_validity/1      :: (certificate()) -> string()).
--spec(peer_cert_subject_items/2  ::
-        (certificate(), tuple()) -> [string()] | 'not_found').
--spec(peer_cert_auth_name/1 ::
-        (certificate()) -> binary() | 'not_found' | 'unsafe').
-
--endif.
+-spec peer_cert_issuer(certificate()) -> string().
+-spec peer_cert_subject(certificate()) -> string().
+-spec peer_cert_validity(certificate()) -> string().
+-spec peer_cert_subject_items
+        (certificate(), tuple()) -> [string()] | 'not_found'.
+-spec peer_cert_auth_name
+        (certificate()) -> binary() | 'not_found' | 'unsafe'.
 
 %%--------------------------------------------------------------------------
 %% High-level functions used by reader

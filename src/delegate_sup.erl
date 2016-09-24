@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(delegate_sup).
@@ -26,12 +26,8 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/1 :: (integer()) -> rabbit_types:ok_pid_or_error()).
--spec(count/1 :: ([node()]) -> integer()).
-
--endif.
+-spec start_link(integer()) -> rabbit_types:ok_pid_or_error().
+-spec count([node()]) -> integer().
 
 %%----------------------------------------------------------------------------
 

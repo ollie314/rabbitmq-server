@@ -11,15 +11,20 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_policies).
+
+%% Provides built-in policy parameter
+%% validation functions.
+
 -behaviour(rabbit_policy_validator).
+-behaviour(rabbit_policy_merge_strategy).
 
 -include("rabbit.hrl").
 
--export([register/0, validate_policy/1]).
+-export([register/0, validate_policy/1, merge_policy_value/3]).
 
 -rabbit_boot_step({?MODULE,
                    [{description, "internal policies"},
@@ -35,7 +40,16 @@ register() ->
                           {policy_validator, <<"message-ttl">>},
                           {policy_validator, <<"expires">>},
                           {policy_validator, <<"max-length">>},
-                          {policy_validator, <<"max-length-bytes">>}]],
+                          {policy_validator, <<"max-length-bytes">>},
+                          {policy_validator, <<"queue-mode">>},
+                          {operator_policy_validator, <<"expires">>},
+                          {operator_policy_validator, <<"message-ttl">>},
+                          {operator_policy_validator, <<"max-length">>},
+                          {operator_policy_validator, <<"max-length-bytes">>},
+                          {policy_merge_strategy, <<"expires">>},
+                          {policy_merge_strategy, <<"message-ttl">>},
+                          {policy_merge_strategy, <<"max-length">>},
+                          {policy_merge_strategy, <<"max-length-bytes">>}]],
     ok.
 
 validate_policy(Terms) ->
@@ -83,4 +97,17 @@ validate_policy0(<<"max-length-bytes">>, Value)
   when is_integer(Value), Value >= 0 ->
     ok;
 validate_policy0(<<"max-length-bytes">>, Value) ->
-    {error, "~p is not a valid maximum length in bytes", [Value]}.
+    {error, "~p is not a valid maximum length in bytes", [Value]};
+
+validate_policy0(<<"queue-mode">>, <<"default">>) ->
+    ok;
+validate_policy0(<<"queue-mode">>, <<"lazy">>) ->
+    ok;
+validate_policy0(<<"queue-mode">>, Value) ->
+    {error, "~p is not a valid queue-mode value", [Value]}.
+
+merge_policy_value(<<"message-ttl">>, Val, OpVal)      -> min(Val, OpVal);
+merge_policy_value(<<"max-length">>, Val, OpVal)       -> min(Val, OpVal);
+merge_policy_value(<<"max-length-bytes">>, Val, OpVal) -> min(Val, OpVal);
+merge_policy_value(<<"expires">>, Val, OpVal)          -> min(Val, OpVal).
+

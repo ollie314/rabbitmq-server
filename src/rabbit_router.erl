@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(rabbit_router).
@@ -22,21 +22,17 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
 -export_type([routing_key/0, match_result/0]).
 
--type(routing_key() :: binary()).
--type(match_result() :: [rabbit_types:binding_destination()]).
+-type routing_key() :: binary().
+-type match_result() :: [rabbit_types:binding_destination()].
 
--spec(match_bindings/2 :: (rabbit_types:binding_source(),
+-spec match_bindings(rabbit_types:binding_source(),
                            fun ((rabbit_types:binding()) -> boolean())) ->
-    match_result()).
--spec(match_routing_key/2 :: (rabbit_types:binding_source(),
+    match_result().
+-spec match_routing_key(rabbit_types:binding_source(),
                              [routing_key()] | ['_']) ->
-    match_result()).
-
--endif.
+    match_result().
 
 %%----------------------------------------------------------------------------
 

@@ -11,15 +11,15 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(worker_pool).
 
 %% Generic worker pool manager.
 %%
-%% Submitted jobs are functions. They can be executed asynchronously
-%% (using worker_pool:submit/1, worker_pool:submit/2) or synchronously
+%% Submitted jobs are functions. They can be executed synchronously
+%% (using worker_pool:submit/1, worker_pool:submit/2) or asynchronously
 %% (using worker_pool:submit_async/1).
 %%
 %% We typically use the worker pool if we want to limit the maximum
@@ -61,20 +61,16 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
+-type mfargs() :: {atom(), atom(), [any()]}.
 
--type(mfargs() :: {atom(), atom(), [any()]}).
-
--spec(start_link/1 :: (atom()) -> {'ok', pid()} | {'error', any()}).
--spec(submit/1 :: (fun (() -> A) | mfargs()) -> A).
--spec(submit/2 :: (fun (() -> A) | mfargs(), 'reuse' | 'single') -> A).
--spec(submit/3 :: (atom(), fun (() -> A) | mfargs(), 'reuse' | 'single') -> A).
--spec(submit_async/1 :: (fun (() -> any()) | mfargs()) -> 'ok').
--spec(ready/2 :: (atom(), pid()) -> 'ok').
--spec(idle/2 :: (atom(), pid()) -> 'ok').
--spec(default_pool/0 :: () -> atom()).
-
--endif.
+-spec start_link(atom()) -> {'ok', pid()} | {'error', any()}.
+-spec submit(fun (() -> A) | mfargs()) -> A.
+-spec submit(fun (() -> A) | mfargs(), 'reuse' | 'single') -> A.
+-spec submit(atom(), fun (() -> A) | mfargs(), 'reuse' | 'single') -> A.
+-spec submit_async(fun (() -> any()) | mfargs()) -> 'ok'.
+-spec ready(atom(), pid()) -> 'ok'.
+-spec idle(atom(), pid()) -> 'ok'.
+-spec default_pool() -> atom().
 
 %%----------------------------------------------------------------------------
 

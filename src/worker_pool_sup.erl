@@ -11,7 +11,7 @@
 %% The Original Code is RabbitMQ.
 %%
 %% The Initial Developer of the Original Code is GoPivotal, Inc.
-%% Copyright (c) 2007-2015 Pivotal Software, Inc.  All rights reserved.
+%% Copyright (c) 2007-2016 Pivotal Software, Inc.  All rights reserved.
 %%
 
 -module(worker_pool_sup).
@@ -24,14 +24,10 @@
 
 %%----------------------------------------------------------------------------
 
--ifdef(use_specs).
-
--spec(start_link/0 :: () -> rabbit_types:ok_pid_or_error()).
--spec(start_link/1 :: (non_neg_integer()) -> rabbit_types:ok_pid_or_error()).
--spec(start_link/2 :: (non_neg_integer(), atom())
-                   -> rabbit_types:ok_pid_or_error()).
-
--endif.
+-spec start_link() -> rabbit_types:ok_pid_or_error().
+-spec start_link(non_neg_integer()) -> rabbit_types:ok_pid_or_error().
+-spec start_link(non_neg_integer(), atom())
+                   -> rabbit_types:ok_pid_or_error().
 
 %%----------------------------------------------------------------------------
 
@@ -48,7 +44,11 @@ start_link(WCount, PoolName) ->
 %%----------------------------------------------------------------------------
 
 init([WCount, PoolName]) ->
-    {ok, {{one_for_one, 10, 10},
+    %% we want to survive up to 1K of worker restarts per second,
+    %% e.g. when a large worker pool used for network connections
+    %% encounters a network failure. This is the case in the LDAP authentication
+    %% backend plugin.
+    {ok, {{one_for_one, 1000, 1},
           [{worker_pool, {worker_pool, start_link, [PoolName]}, transient,
             16#ffffffff, worker, [worker_pool]} |
            [{N, {worker_pool_worker, start_link, [PoolName]}, transient,
